@@ -1,0 +1,19 @@
+[package]
+name = "yan-engine-cabi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "YanMusic 引擎的纯 C ABI 绑定层（供 iOS/Swift 直接调用）"
+
+[lib]
+name = "yan_engine_cabi"
+# staticlib → 静态链接进 iOS App（App Store 不允许 dlopen 任意路径）
+# cdylib   → 同时产出，便于桌面测试用
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+yan-engine-core.workspace = true
+
+[features]
+default = []

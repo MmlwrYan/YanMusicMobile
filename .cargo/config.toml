@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────
+# Rust → Android 交叉编译配置
+# ─────────────────────────────────────────────────────────────────
+#
+# 为什么需要这个文件：
+#   ① Rust 自己不会去找 NDK 的 clang —— `aarch64-linux-android` 这个
+#      target 只提供 std，链接阶段必须显式指定 linker，否则报
+#      `linker `cc` not found` 或链出 x86_64 的产物。
+#   ② Android 15+ / Google Play（2025-11 起）要求 **16KB page size**
+#      对齐。NDK r27+ 的 clang 默认仍是 4KB 对齐，必须显式传
+#      `-Wl,-z,max-page-size=16384`，否则上架会被拒。
+#
+# ⚠️ 关于 linker 路径：
+#    CI（Linux）与本地（Windows）的 NDK 路径不同，写死任一个都会让
+#    另一侧失效。因此这里不写绝对路径，而是由**环境变量**提供：
+#
+#      CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER
+#      CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER
+#      ...
+#
+#    设置方法：
+#      - CI：    由 .github/workflows/build-libmpv-android.yml 注入
+#      - 本地：  `source scripts/android/env-android.sh`（或 .ps1）
+#
+#    若环境变量缺失，Rust 会回退到系统 `cc` 并大概率链接失败 ——
+#    这是**有意为之**：宁可明确报错，也不要静默产出错误架构的库。
+#
+# ⚠️ rustflags 里的链接参数对所有 Android target 生效。
+#    若将来需要区分，可以拆成 [target.<triple>] 各自的 rustflags。
+
+[target.aarch64-linux-android]
+ar = "llvm-ar"
+rustflags = [
+  # 16KB page size 对齐（Android 15+ / Play 强制）
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+  # 减小体积：strip 在 Cargo.toml 的 profile 里已开，这里再确保
+  # 不打 .eh_frame（panic="abort" 时用不到）
+  "-C", "link-arg=-Wl,--gc-sections",
+]
+
+[target.armv7-linux-androideabi]
+ar = "llvm-ar"
+rustflags = [
+  # 32 位 armv7 不涉及 16KB 对齐要求，但保留 gc-sections 减体积
+  "-C", "link-arg=-Wl,--gc-sections",
+]
+
+[target.x86_64-linux-android]
+ar = "llvm-ar"
+rustflags = [
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+  "-C", "link-arg=-Wl,--gc-sections",
+]
+
+[target.i686-linux-android]
+ar = "llvm-ar"
+rustflags = [
+  "-C", "link-arg=-Wl,--gc-sections",
+]

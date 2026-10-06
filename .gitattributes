@@ -1,0 +1,58 @@
+# ─────────────────────────────────────────────────────────────────
+# 行尾（EOL）策略 —— 本仓库必须显式声明
+# ─────────────────────────────────────────────────────────────────
+#
+# 为什么需要：
+#   本机 git 配置 core.autocrlf=true（Windows 常见默认），
+#   会在 checkout 时把 LF 转成 CRLF。
+#   但 CI 跑在 Linux（ubuntu-22.04），CRLF 的 shell 脚本会直接失败：
+#     /usr/bin/env: 'bash\r': No such file or directory
+#   更隐蔽的是 gradlew —— 带 CRLF 时同样报
+#     bash: ./gradlew: /bin/sh^M: bad interpreter
+#   症状指向"找不到解释器"，根因却是行尾。
+#
+# 策略：
+#   - 强制 LF：shell 脚本、gradlew、YAML、Rust/Kotlin 源码、Markdown
+#   - 强制 CRLF：Windows 批处理（.bat / .cmd）—— cmd.exe 需要 CRLF
+#   - 二进制：不做任何转换
+#
+# 注：`text eol=lf` 会同时接管「入库时归一化」与「checkout 时保持」两侧。
+# ─────────────────────────────────────────────────────────────────
+
+# 默认：自动检测，入库时归一化为 LF
+* text=auto
+
+# ── 强制 LF（跨平台脚本与源码）──
+*.sh            text eol=lf
+gradlew         text eol=lf
+*.bash          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.rs            text eol=lf
+*.kt            text eol=lf
+*.kts           text eol=lf
+*.toml          text eol=lf
+*.md            text eol=lf
+*.xml           text eol=lf
+*.properties    text eol=lf
+*.example       text eol=lf
+.gitignore      text eol=lf
+.gitattributes  text eol=lf
+
+# ── 强制 CRLF（Windows 批处理需要）──
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+
+# ── 二进制：禁止转换 ──
+*.jar           binary
+*.so            binary
+*.apk           binary
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.keystore      binary
+*.zip           binary
+*.tar.gz        binary

@@ -1,0 +1,17 @@
+[package]
+name = "yan-engine-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "YanMusic 跨平台音频引擎核心 —— 平台无关，零 jni/napi 依赖"
+
+[lib]
+name = "yan_engine_core"
+crate-type = ["rlib"]        # 纯库，由上层绑定层消费
+
+[dependencies]
+libloading.workspace = true
+
+[features]
+default = []

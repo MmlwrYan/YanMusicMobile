@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "yan-engine-core",
+    "yan-engine-jni",
+    "yan-engine-cabi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["颜克龙"]
+
+[workspace.dependencies]
+yan-engine-core = { path = "yan-engine-core" }
+libloading = "0.8"
+jni = "0.21"
+log = "0.4"
+
+# Android 交叉编译产物配置（cdylib）
+[profile.release]
+opt-level = "z"        # 体积优先（移动端）
+lto = true             # 跨 crate 优化，显著减小体积
+codegen-units = 1      # 与 lto 配合，最大化优化
+strip = "symbols"      # 去符号表
+panic = "abort"        # 不展开栈，减体积

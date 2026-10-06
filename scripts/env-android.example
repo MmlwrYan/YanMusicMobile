@@ -1,0 +1,11 @@
+# YanMusic Android 环境变量
+# 由 setup-android-env.ps1 生成于 2026-10-04
+#
+# 用法（PowerShell）：. .\scripts\android\env-android.ps1
+# 用法（bash）：      export $(grep -v '^#' scripts/env-android.sh | xargs)
+
+ANDROID_SDK_ROOT=D:\Android\Sdk
+ANDROID_HOME=D:\Android\Sdk
+JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.13.11-hotspot
+ANDROID_NDK_VERSION=27.1.12297006
+ANDROID_NDK_ROOT=D:\Android\Sdk\ndk\27.1.12297006

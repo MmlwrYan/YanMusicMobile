@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 读本地音频（Demo 阶段用 SAF 选文件，此为兜底） -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!--
+      正式播放需要的前台服务权限（Demo 不启用，但先声明好，
+      避免你后续接 MediaSessionService 时忘了 API 34 的独立权限）。
+      ⚠️ FOREGROUND_SERVICE_MEDIA_PLAYBACK 是 API 34 新增的独立权限，
+         只声明 FOREGROUND_SERVICE 不够。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      ⚠️ 这里**不要**写 android:extractNativeLibs。
+      它由 app/build.gradle.kts 的 packaging.jniLibs.useLegacyPackaging 决定：
+        useLegacyPackaging = false → AGP 写入 extractNativeLibs="false"
+      显式在此声明会**覆盖** AGP 的写入，导致二者矛盾——
+
+      2026-10-04 实测：显式写 true 时 Gradle 报
+        "PackagingOptions.jniLibs.useLegacyPackaging should be set to true
+         because android:extractNativeLibs is set to \"true\" in AndroidManifest.xml"
+
+      为什么选 false（不解压）：
+        - .so 以未压缩、页对齐方式直接存在 APK 里，运行时 mmap 而非解压到 /data
+        - 安装更快、占 ROM 更小（Android 6+ 官方推荐，也是 AGP 默认）
+        - 前提是 .so 必须「未压缩 + 4KB 页对齐」，由 useLegacyPackaging=false 保证
+      若日后发现某设备 dlopen 失败且怀疑与 mmap 有关，再改回 true 并同步
+      把 build.gradle.kts 的 useLegacyPackaging 改成 true（两处必须一致）。
+    -->
+    <application
+        android:allowBackup="false"
+        android:label="YanMusic Demo"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.YanMusicDemo">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.YanMusicDemo">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

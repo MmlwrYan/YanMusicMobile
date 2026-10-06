@@ -1,0 +1,26 @@
+# Android 工程构建产物
+build/
+*/build/
+.gradle/
+.kotlin/
+.cxx/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+
+# Rust 构建产物
+# 注：拆分前这条由 YanMusic 根 .gitignore 提供，本仓库已是根，须自带。
+target/
+
+# native 产物（来自 CI 或本地 Rust 构建，不入库）
+prebuilt/
+build-jni/
+
+# Gradle
+gradle-app.setting
+.gradletasknamecache
+
+# 搬迁备份目录（如启用「先平级、后归档」方案，归档进本库时须排除）
+_backup-android-*/

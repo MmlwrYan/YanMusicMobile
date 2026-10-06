@@ -1,0 +1,615 @@
+name: Build libmpv for Android
+
+# 交叉编译 libmpv（音频专用）供 YanMusic Android 端使用。
+#
+# 背景：mpv 官方 buildscripts 明确不支持 Windows/WSL，本机开发环境
+# （Windows + WSL 被安全策略禁用 + 无 Docker）无法构建 native，
+# 因此把这一步放到 ubuntu-latest runner 上。
+#
+# 触发方式：
+#   - workflow_dispatch（手动，日常迭代用这个）
+#   - push 到 android-native 分支且改动 build-inputs（自动验证）
+#   - tag android-native-v*（产出可归档产物）
+#
+# 产物：libmpv.so + 全部 DT_NEEDED 依赖 .so（arm64-v8a），
+#       以 tar.gz 形式上传为 artifact，本地解包后放进
+#       app/src/main/jniLibs/arm64-v8a/。
+
+on:
+  workflow_dispatch:
+    inputs:
+      mpv_version:
+        description: 'mpv 版本/commit（留空 = 用 buildscripts 锁定的版本）'
+        required: false
+        default: ''
+        type: string
+      arch:
+        description: '目标架构'
+        required: true
+        default: 'arm64'
+        type: choice
+        options:
+          - arm64
+          - armv7l
+          - x86_64
+      audio_only:
+        description: '音频专用精简构建（关闭视频栈，显著减小体积）'
+        required: true
+        default: true
+        type: boolean
+
+  # ⚠️ push 只能有一个 key（YAML 不允许重复键，GitHub Actions 也不支持拆成两个 push）。
+  #
+  # 这里**刻意不写 `paths` 过滤器**，原因：
+  #   push 的 `paths` 对 branches 与 tags **同时生效**。加了 paths 后，
+  #   给任意提交打 `android-native-v*` tag 时，只有该提交恰好改了
+  #   .github/workflows/ 或 scripts/ 才会触发 —— 这不是我们想要的
+  #   （打 tag 就是为了无条件出归档产物）。
+  #
+  # 代价：push 到 android-native 分支即使只改无关文件也会跑一次（该分支本就是
+  # 专用的 native 验证分支，不会频繁推送，可以接受）。改用 concurrency 去重。
+  push:
+    branches:
+      - android-native
+    tags:
+      - 'android-native-v*'
+
+concurrency:
+  group: android-native-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-libmpv:
+    name: Build libmpv (${{ inputs.arch || 'arm64' }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240          # 全量依赖构建很慢，给足 4 小时
+
+    env:
+      # ⚠️ workflow_dispatch 之外的触发方式（push / tag）下 inputs 为空，
+      #    所以每个都必须有 `|| default` 兜底。别写成
+      #    `inputs.arch` 直接引用 —— 会得到空字符串，导致 buildall
+      #    收到 `--arch ""` 而失败。
+      ARCH: ${{ inputs.arch || 'arm64' }}
+      # audio_only 默认 true；显式传 false 才走完整构建
+      AUDIO_ONLY: ${{ (inputs.audio_only == false) && '0' || '1' }}
+      MPV_VERSION_OVERRIDE: ${{ inputs.mpv_version || '' }}
+      # buildscripts 期望的目录名（download.sh 会占用此路径）
+      WORKDIR: ${{ github.workspace }}/android-build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ────────────────────────────────────────────────────────────
+      # 1. 系统依赖：官方 README 说 download.sh 会自动装，但它对
+      #    非标准镜像的探测不可靠 —— 显式装一遍，保证可复现。
+      # ────────────────────────────────────────────────────────────
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git wget curl unzip zip \
+            pkg-config autoconf automake libtool \
+            python3 python3-pip \
+            ninja-build meson \
+            nasm yasm \
+            libssl-dev \
+            ca-certificates
+          echo "--- versions ---"
+          meson --version
+          ninja --version
+          python3 --version
+          gcc --version | head -1
+
+      # ────────────────────────────────────────────────────────────
+      # 2. Android SDK + NDK
+      #    runner 自带 SDK，但我们需要特定 NDK（buildscripts 期望 r28）
+      #    与 API 35 build-tools。官方 download.sh 也会装，但显式控制
+      #    版本更可靠；同时把 NDK 缓存起来。
+      # ────────────────────────────────────────────────────────────
+      - name: Set up Android SDK / NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0 ndk;28.0.13004108'
+      
+      - name: Verify NDK
+        run: |
+          # setup-android 会设置 ANDROID_HOME / ANDROID_SDK_ROOT；
+          # 若为空则从 NDK 反查，避免后面 symlink 出空路径。
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$SDK" ]; then
+            SDK="$(dirname "$(dirname "$(command -v sdkmanager || echo /nonexistent)")")"
+          fi
+          if [ ! -d "$SDK" ]; then
+            echo "::error::无法定位 Android SDK 目录"
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK"
+          ls "$SDK/ndk/"
+          NDK_DIR="$(ls -d "$SDK"/ndk/* | head -1)"
+          if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
+            echo "::error::NDK 未安装"
+            exit 1
+          fi
+          echo "NDK_DIR=$NDK_DIR" >> "$GITHUB_ENV"
+          "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -2
+
+      # ────────────────────────────────────────────────────────────
+      # 3. 获取 mpv-android buildscripts
+      #    （这是构建编排器，源码树由它自己 download.sh 拉取）
+      # ────────────────────────────────────────────────────────────
+      - name: Fetch buildscripts
+        run: |
+          mkdir -p "$WORKDIR"
+          cd "$WORKDIR"
+          git clone --depth 1 https://github.com/mpv-android/mpv-android.git
+          ls mpv-android/buildscripts/
+          echo "--- depinfo (版本锁定) ---"
+          cat mpv-android/buildscripts/include/depinfo.sh
+
+      # ────────────────────────────────────────────────────────────
+      # 4. ★ 缓存：按 depinfo.sh 的哈希做 key
+      #    「全量编译很慢」的解法不是笼统缓存，而是
+      #    a) 缓存 download.sh 拉取的源码包（下载阶段）
+      #    b) 缓存已编译的 prefix/ 目录（编译阶段，最贵）
+      #    两层都用 depinfo.sh 内容做 key —— 依赖版本一变 key 就变，
+      #    不会拿到过期缓存。
+      # ────────────────────────────────────────────────────────────
+      - name: Compute dependency hash
+        id: deps
+        run: |
+          DEPINFO="$WORKDIR/mpv-android/buildscripts/include/depinfo.sh"
+          HASH="$(sha256sum "$DEPINFO" | cut -d' ' -f1)"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "depinfo sha256: $HASH"
+
+      # 4a. 源码缓存（tarball 下载，几百 MB，避免每次重新下载）
+      - name: Cache downloaded sources
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WORKDIR }}/mpv-android/buildscripts/tarballs
+          key: mpv-android-src-${{ steps.deps.outputs.hash }}-${{ env.ARCH }}
+          restore-keys: |
+            mpv-android-src-${{ steps.deps.outputs.hash }}-
+            mpv-android-src-
+
+      # 4b. ★ 编译产物缓存（最贵的一层：ffmpeg/libplacebo/libass 等）
+      - name: Cache compiled prefix
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.WORKDIR }}/mpv-android/buildscripts/prefix
+          key: mpv-android-prefix-${{ steps.deps.outputs.hash }}-${{ env.ARCH }}-${{ env.AUDIO_ONLY }}-v1
+          restore-keys: |
+            mpv-android-prefix-${{ steps.deps.outputs.hash }}-${{ env.ARCH }}-
+            mpv-android-prefix-
+
+      # ────────────────────────────────────────────────────────────
+      # 5. download.sh —— 拉源码（已缓存则跳过实际下载）
+      #    传入已存在的 SDK 路径，避免它重复下载 SDK
+      # ────────────────────────────────────────────────────────────
+      - name: Download sources
+        working-directory: ${{ env.WORKDIR }}/mpv-android/buildscripts
+        run: |
+          # download.sh 期望同目录下有个指向 SDK 的 `android-sdk-linux`。
+          # ANDROID_HOME 已在 Verify NDK 步骤里保证非空并写入 $GITHUB_ENV。
+          rm -rf android-sdk-linux
+          ln -sfn "$ANDROID_HOME" android-sdk-linux
+          ls -l android-sdk-linux
+          ./download.sh 2>&1 | tail -40
+          echo "--- tarballs ---"
+          ls -la tarballs/ 2>/dev/null | head -30 || echo "(no tarballs dir)"
+
+      # ────────────────────────────────────────────────────────────
+      # 6. ★ 音频专用裁剪：打补丁修改 depinfo / 构建脚本
+      #    目标：关闭 libplacebo（视频渲染，最大依赖）、libass、
+      #    lua 等音频 App 不需要的东西；并确保 ffmpeg 保留
+      #    ape / flac / dsd / pcm_s24le 解码与 afir/equalizer 滤镜。
+      # ────────────────────────────────────────────────────────────
+      - name: Apply audio-only trimming
+        if: env.AUDIO_ONLY == '1'
+        working-directory: ${{ env.WORKDIR }}/mpv-android/buildscripts
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/apply-audio-trim.sh"
+
+      # ────────────────────────────────────────────────────────────
+      # 7. 构建（--arch 单架构，只构建 mpv 及其依赖链）
+      #    依赖链：mpv = ffmpeg + libass + lua + libplacebo
+      #    ⚠️ 不要用 `./buildall.sh | tee` —— 管道后 $? 是 tee 的退出码，
+      #       buildall 失败会被判成成功（脚本自身会 exit 1，但被管道吞掉）。
+      #       用 PIPESTATUS 显式取第一段退出码。
+      # ────────────────────────────────────────────────────────────
+      - name: Build libmpv
+        working-directory: ${{ env.WORKDIR }}/mpv-android/buildscripts
+        run: |
+          set -o pipefail
+          ./buildall.sh --arch "$ARCH" mpv 2>&1 | tee /tmp/build.log
+          EXIT="${PIPESTATUS[0]}"
+          echo "=== buildall exit: $EXIT ==="
+          if [ "$EXIT" -ne 0 ]; then
+            echo "::error::buildall.sh 失败（exit $EXIT），日志尾部如下"
+            tail -80 /tmp/build.log
+            exit "$EXIT"
+          fi
+
+      # ────────────────────────────────────────────────────────────
+      # 8. 收集产物：libmpv.so + 全部 DT_NEEDED 依赖
+      #    必须一并打包，否则运行时报 dlopen failed: xxx not found
+      # ────────────────────────────────────────────────────────────
+      - name: Collect native libraries
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/collect-libs.sh"
+
+      # ────────────────────────────────────────────────────────────
+      # 9. 体积与架构验证（防止产出错误架构或意外膨胀）
+      # ────────────────────────────────────────────────────────────
+      - name: Verify artifacts
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/verify-libs.sh"
+
+      # ────────────────────────────────────────────────────────────
+      # 10. 上传 artifact
+      # ────────────────────────────────────────────────────────────
+      - name: Upload libmpv artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmpv-android-${{ env.ARCH }}-${{ env.AUDIO_ONLY == '1' && 'audio' || 'full' }}
+          path: |
+            ${{ github.workspace }}/out/libmpv-*.tar.gz
+            ${{ github.workspace }}/out/MANIFEST.txt
+          retention-days: 30
+
+      # 11. 失败时把构建日志也存下来（诊断用）
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ env.ARCH }}
+          path: /tmp/build.log
+          retention-days: 7
+
+  # ════════════════════════════════════════════════════════════════
+  # 第二个 job：构建 Rust JNI 桥接层（libyan_engine_jni.so）
+  #
+  # 为什么单独一个 job（而不是塞进上面那个）：
+  #   ① 上面那个是「mpv 本体」，几十分钟起步、依赖整条 ffmpeg 链；
+  #      本 job 只有 Rust + NDK，1~2 分钟，失败时要能一眼看出是谁的锅。
+  #   ② 二者可**并行**，不必串成一条长链。
+  #   ③ 产物分别上传，互不干扰。
+  #
+  # ★ 关键：本 job 使用仓库里的 `.cargo/config.toml`，
+  #   其中包含 **16KB page size 对齐**（`-Wl,-z,max-page-size=16384`），
+  #   与**本机交叉编译完全同一份配置** —— 这就是「云 CI 产出与
+  #   本机一样对齐的 .so」的保证。
+  #
+  #   2026-10-04 本机实测：该配置下产出的 .so，LOAD 段 Align = 0x4000 (16384)。
+  # ════════════════════════════════════════════════════════════════
+  build-rust-bridge:
+    name: Build Rust JNI bridge (arm64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    # 只做 arm64（Demo 阶段 abiFilters 也只开 arm64-v8a）
+    env:
+      RUST_TARGET: aarch64-linux-android
+      ABI: arm64-v8a
+      NDK_VERSION: '27.1.12297006'   # 与本机/上面 job 保持一致的 NDK 版本（r27b）
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup Android SDK / NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'ndk;${{ env.NDK_VERSION }}'
+
+      # ────────────────────────────────────────────────────────────
+      # ★ 注入 Cargo 交叉编译 linker（与 scripts/env-android.sh 同一套约定）
+      #
+      # `.cargo/config.toml` 刻意不写死 NDK 绝对路径
+      # （CI=Linux / 本机=Windows 路径不同），改由环境变量提供：
+      #   CARGO_TARGET_<TRIPLE 大写且 - 换 _>_LINKER
+      # 缺失时 Cargo 回退系统 cc 并链接失败 —— 这是有意为之。
+      # ────────────────────────────────────────────────────────────
+      - name: Export NDK paths and Cargo linker
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [ -z "$SDK" ]; then
+            SDK="$(dirname "$(dirname "$(command -v sdkmanager || echo /nonexistent)")")"
+          fi
+          [ -d "$SDK" ] || { echo "::error::无法定位 Android SDK"; exit 1; }
+
+          NDK_DIR="$SDK/ndk/$NDK_VERSION"
+          [ -d "$NDK_DIR" ] || { echo "::error::NDK $NDK_VERSION 未安装于 $NDK_DIR"; exit 1; }
+
+          NDK_BIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export LINKER="$NDK_BIN/aarch64-linux-android26-clang"
+          [ -x "$LINKER" ] || { echo "::error::linker 不存在：$LINKER"; exit 1; }
+
+          # ★ 名称是 Cargo 规定的：CARGO_TARGET_<TRIPLE 大写, - 换 _>_LINKER
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$LINKER" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "NDK_DIR=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+
+          echo "=== NDK / linker ==="
+          echo "NDK_DIR = $NDK_DIR"
+          echo "LINKER  = $LINKER"
+          "$LINKER" --version | head -2
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-android-${{ hashFiles('Cargo.lock') }}-${{ env.ABI }}
+          restore-keys: |
+            rust-android-${{ env.ABI }}-
+
+      - name: Build yan-engine-jni
+        working-directory: .
+        run: |
+          set -o pipefail
+          # ★ 使用的正是仓库里的 .cargo/config.toml（含 16KB 对齐）
+          cargo build -p yan-engine-jni \
+            --target "$RUST_TARGET" \
+            --release \
+            2>&1 | tee /tmp/cargo.log
+          echo "=== cargo exit: ${PIPESTATUS[0]} ==="
+          [ "${PIPESTATUS[0]}" -eq 0 ] || { tail -60 /tmp/cargo.log; exit 1; }
+
+      - name: Collect Rust .so into stage layout
+        run: |
+          # 复用与 mpv 产物相同的 stage 布局，便于沿用 verify-libs.sh
+          SRC="target/$RUST_TARGET/release/libyan_engine_jni.so"
+          [ -f "$SRC" ] || { echo "::error::未找到产物：$SRC"; ls -la "target/$RUST_TARGET/release/" || true; exit 1; }
+          mkdir -p "out/stage/$ABI"
+          cp "$SRC" "out/stage/$ABI/"
+          ls -la "out/stage/$ABI/"
+
+      # ────────────────────────────────────────────────────────────
+      # ★ 架构 + 16KB 对齐 + JNI 符号 三项硬断言
+      #
+      # 为什么不复用 scripts/verify-libs.sh：
+      #   该脚本的「检查 3」硬要求 libmpv.so 存在（缺则 die），
+      #   而本 job 只产出 Rust 桥接库，没有 libmpv.so →
+      #   脚本会在检查 3 直接 FATAL 退出。
+      #   虽然它的检查 1/2（架构、对齐）逻辑是对的，但混用会
+      #   产生「明明是预期的缺失却报 FATAL」的噪声，也会掩盖真失败。
+      #   所以这里内联一份等价逻辑，只覆盖本 job 真正需要断言的三项。
+      #   （mpv 产物那边仍用 verify-libs.sh，各司其职。）
+      # ────────────────────────────────────────────────────────────
+      - name: Verify architecture, JNI symbols and 16KB alignment
+        run: |
+          set -euo pipefail
+          SO="out/stage/$ABI/libyan_engine_jni.so"
+          BIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          [ -f "$SO" ] || { echo "::error::未找到 $SO"; exit 1; }
+
+          echo "=== 1/3 架构（期望 AArch64）==="
+          MACHINE="$("$BIN/llvm-readelf" -h "$SO" \
+            | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p' | head -1)"
+          echo "Machine = $MACHINE"
+          [ "$MACHINE" = "AArch64" ] || { echo "::error::架构不是 AArch64：$MACHINE"; exit 1; }
+
+          echo "=== 2/3 JNI 符号（期望 20 个）==="
+          COUNT="$("$BIN/llvm-nm" -D "$SO" | grep -c 'Java_com_yanmusic_engine_MpvEngine_')"
+          echo "symbol count = $COUNT"
+          if [ "$COUNT" -ne 20 ]; then
+            echo "::error::JNI 符号数应为 20，实际 $COUNT —— 下面列出实际导出："
+            "$BIN/llvm-nm" -D "$SO" | grep 'MpvEngine_' || echo "(一个都没有)"
+            exit 1
+          fi
+          # 逐条列出，方便在 CI 日志里肉眼核对
+          "$BIN/llvm-nm" -D "$SO" | grep 'Java_com_yanmusic_engine_MpvEngine_' | awk '{print "  "$3}'
+
+          echo "=== 3/3 16KB page size 对齐（每个 LOAD 段 Align >= 16384）==="
+          # ⚠️ Align 是 LOAD 行的最后一个字段 → 取 $NF
+          # ⚠️ sort -u 是字符串排序（"0x1000" > "0x4000"）→ 必须转十进制再 sort -n
+          ALIGNS="$("$BIN/llvm-readelf" -l "$SO" \
+            | grep -E '^[[:space:]]+LOAD' | awk '{print $NF}' | sort -u)"
+          echo "LOAD align(s) = $(echo $ALIGNS | tr '\n' ' ')"
+          MIN_DEC="$(for a in $ALIGNS; do printf '%d\n' "$a"; done | sort -n | head -1)"
+          echo "min align (decimal) = $MIN_DEC  (要求 >= 16384)"
+          [ -n "$MIN_DEC" ] && [ "$MIN_DEC" -ge 16384 ] \
+            || { echo "::error::未达 16KB 对齐：min=$MIN_DEC"; exit 1; }
+
+          echo ""
+          echo "✓ 全部通过：AArch64 / 20 个 JNI 符号 / LOAD Align >= 16384"
+
+      - name: Package Rust bridge artifact
+        run: |
+          mkdir -p out
+          PKG="out/libyan_engine_jni-android-$ABI.tar.gz"
+          tar -czf "$PKG" -C "out/stage" "$ABI"
+          echo "=== 打包结果 ==="
+          ls -la "$PKG"
+          sha256sum "$PKG"
+          echo "--- 包内 ---"
+          tar -tzf "$PKG"
+
+      - name: Upload Rust bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yan-engine-jni-android-${{ env.ABI }}
+          path: ${{ github.workspace }}/out/libyan_engine_jni-android-*.tar.gz
+          retention-days: 30
+
+      - name: Upload cargo log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-log-rust-bridge
+          path: /tmp/cargo.log
+          retention-days: 7
+
+  # ════════════════════════════════════════════════════════════════
+  # job 3/3：build-apk —— 打包 Debug APK
+  #
+  # 依赖 build-rust-bridge：APK 需要打包 libyan_engine_jni.so。
+  # 这一步把「能装起来」的链路固化进 CI：
+  #   下载 Rust 桥产物 → 放进 jniLibs → gradlew assembleDebug → 上传 APK
+  #
+  # ⚠️ 本 job 只打 Rust 桥的 .so，**不含 libmpv.so 及其依赖** ——
+  #    那些由 build-libmpv 产出，体积大且需单独分发。
+  #    因此该 APK 单独安装会在 System.loadLibrary("mpv") 处失败，
+  #    必须配合 build-libmpv 的 tar 使用（见 Release 说明 / README）。
+  # ════════════════════════════════════════════════════════════════
+  build-apk:
+    name: Build Debug APK (arm64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    needs: build-rust-bridge
+
+    env:
+      ABI: arm64-v8a
+      # 与 build-rust-bridge 保持一致的 NDK（Gradle 侧也会用 NDK 做打包/剥离）
+      NDK_VERSION: '27.1.12297006'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0 ndk;27.1.12297006'
+
+      - name: Download Rust bridge artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: yan-engine-jni-android-${{ env.ABI }}
+          path: /tmp/rust-bridge
+
+      - name: Unpack Rust .so into jniLibs
+        run: |
+          set -euo pipefail
+          # artifact 是 tar.gz，包内结构为 <abi>/libyan_engine_jni.so
+          mkdir -p /tmp/rust-bridge-extract
+          tar -xzf /tmp/rust-bridge/libyan_engine_jni-android-$ABI.tar.gz \
+            -C /tmp/rust-bridge-extract
+          echo "=== 解包内容 ==="
+          find /tmp/rust-bridge-extract -type f -name '*.so' -exec ls -la {} \;
+
+          DEST="app/src/main/jniLibs/$ABI"
+          mkdir -p "$DEST"
+          cp /tmp/rust-bridge-extract/$ABI/*.so "$DEST/"
+          echo "=== jniLibs/$ABI ==="
+          ls -la "$DEST"
+          [ -f "$DEST/libyan_engine_jni.so" ] \
+            || { echo "::error::libyan_engine_jni.so 未就位：$DEST"; exit 1; }
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Run unit tests
+        run: ./gradlew :app:testDebugUnitTest --console=plain --stacktrace
+
+      - name: Assemble Debug APK
+        run: ./gradlew :app:assembleDebug --console=plain --stacktrace
+
+      - name: Verify APK contains the JNI library
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          [ -f "$APK" ] || { echo "::error::APK 未产出：$APK"; exit 1; }
+          echo "=== APK 信息 ==="
+          ls -la "$APK"
+          sha256sum "$APK"
+          echo "=== 确认 libyan_engine_jni.so 已打进 APK ==="
+          unzip -l "$APK" | grep -E 'lib/.*\.so' || true
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libyan_engine_jni.so' \
+            || { echo "::error::APK 内缺少 lib/arm64-v8a/libyan_engine_jni.so"; exit 1; }
+          echo "✓ APK 内含 libyan_engine_jni.so"
+
+      - name: Stage APK with README
+        run: |
+          set -euo pipefail
+          mkdir -p out/apk
+          cp app/build/outputs/apk/debug/app-debug.apk out/apk/
+          # 附一份说明，避免下载者误以为单独装就能跑
+          cat > out/apk/README.txt << 'TXT'
+          YanMusicMobile v0.0.1-alpha —— 最小技术 Demo
+          ============================================
+
+          【这是什么】
+          一个最小技术 Demo，用于验证 Rust → JNI → libmpv → APK 这条链路。
+          不承诺功能完整、不承诺可日常使用、未做 GUI 冒烟。
+
+          【重要：本 APK 单独安装跑不起来】
+          本 APK 只包含 Rust JNI 桥（libyan_engine_jni.so），
+          不包含 libmpv.so 及其依赖（libavcodec / libavformat / libavutil /
+          libswresample / libass ...）。
+
+          单独安装会在 System.loadLibrary("mpv") 处抛
+          UnsatisfiedLinkError。
+
+          【怎么才能跑起来】
+          需要把 libmpv 的 tar 解包到 app/src/main/jniLibs/arm64-v8a/，
+          重新打包，或用 scripts/install-and-run.sh 走真机流程。
+          详见仓库 README 第五节「真机运行」。
+
+          【本版验证了什么】
+          - Rust → JNI 桥可编译、符号表对齐（20 个 JNI 符号）
+          - libmpv 交叉编译流水线在云 CI 跑通（arm64-v8a）
+          - 16KB page size 对齐（Android 15+ / Google Play 2025-11 强制）
+          - APK 构建 + 单元测试在云 CI 跑通
+
+          【未验证】
+          - 应用在真机上能否启动 / 播放 / 出声
+          - GUI 冒烟
+          TXT
+          echo "=== stage 内容 ==="
+          ls -la out/apk/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yanmusicmobile-demo-apk-${{ env.ABI }}
+          path: |
+            ${{ github.workspace }}/out/apk/app-debug.apk
+            ${{ github.workspace }}/out/apk/README.txt
+          retention-days: 30
+
+      - name: Upload Gradle log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-log-build-apk
+          path: |
+            app/build/reports/
+            app/build/test-results/
+            ~/.gradle/daemon/**/*.log
+          retention-days: 7
+          if-no-files-found: ignore

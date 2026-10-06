@@ -1,0 +1,19 @@
+[package]
+name = "yan-engine-jni"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "YanMusic 引擎的 Android JNI 绑定层（消费 yan-engine-core）"
+
+[lib]
+name = "yan_engine_jni"
+# cdylib → 产出 libyan_engine_jni.so，被 System.loadLibrary 加载
+crate-type = ["cdylib"]
+
+[dependencies]
+yan-engine-core.workspace = true
+jni.workspace = true
+
+[features]
+default = []
