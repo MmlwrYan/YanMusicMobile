@@ -116,8 +116,17 @@ fi
 [[ -n "$SYMS" ]] || die "无法读取 $MPV_LIB 的符号表"
 
 for sym in mpv_create mpv_initialize mpv_command mpv_set_option_string mpv_get_property mpv_wait_event mpv_terminate_destroy; do
-  # 用 `-w` 全字匹配，避免 mpv_command_async 之类前缀混淆
-  if echo "$SYMS" | grep -qw "$sym"; then
+  # 用 `-w` 全字匹配，避免 mpv_command_async 之类前缀混淆。
+  #
+  # ⚠️ 不要写 `echo "$SYMS" | grep -qw "$sym"`：
+  #    $SYMS 是多行的大字符串（8 个库的完整符号表，数 MB），
+  #    grep -q 命中即退出 → echo 收到 SIGPIPE → `echo: write error: Broken pipe`；
+  #    在 `set -o pipefail` 下这个 Broken pipe 会让管道整体返回非 0，
+  #    于是**每个符号都被误判为「缺少」**并 FATAL。
+  #    2026-10-06 CI 实测：日志里明明打出了 `✓ mpv_create`，
+  #    却又报「缺少必要导出符号」—— 就是它。
+  #    改用 here-string 把数据直接喂给 grep，无管道、无 SIGPIPE。
+  if grep -qw -- "$sym" <<< "$SYMS"; then
     log "  ✓ $sym"
   else
     printf '  ✗ 缺少符号：%s\n' "$sym"
