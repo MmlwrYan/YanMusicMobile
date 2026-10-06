@@ -89,9 +89,34 @@ while [[ ${#QUEUE[@]} -gt 0 ]]; do
   # 解析 DT_NEEDED
   while IFS= read -r needed; do
     [[ -z "$needed" ]] && continue
-    # 系统库（libc/libm/libdl/liblog/libandroid/...）由 OS 提供，不要打包
+    # ────────────────────────────────────────────────────────────
+    # Android 系统库由 OS 提供，**不要打包**（打进 APK 反而会冲突）。
+    #
+    # 这份名单是 NDK r27 `sysroot/usr/lib/aarch64-linux-android/30/`
+    # 下的全部系统 .so（2026-10-06 实测列出），不是凭印象手写的。
+    #
+    # ⚠️ 为什么必须写全：本脚本末尾会做「依赖闭包完整性」校验，
+    #    凡是解析出 DT_NEEDED 但在 stage 里找不到的，都会报缺失并 die。
+    #    如果某个系统库漏在名单外 → 被误判为「缺失」→ 整个 job 失败。
+    #    2026-10-06 CI 实测就栽在 `libmediandk.so` 上：
+    #      libavcodec.so -> libmediandk.so
+    #      FATAL: 依赖闭包不完整（共 1 项缺失）
+    #    libmediandk 是 NDK 的 android-mediandk（MediaCodec 硬解），
+    #    系统自带，绝不该打包。
+    #
+    # 新增 NDK 版本时，请对照该 sysroot 目录重新核对本名单。
+    # ────────────────────────────────────────────────────────────
     case "$needed" in
-      libc.so|libm.so|libdl.so|liblog.so|libandroid.so|libz.so|libstdc++.so|libc++_shared.so|libOpenSLES.so|libEGL.so|libGLESv2.so|libjnigraphics.so) continue ;;
+      # libc / 运行时
+      libc.so|libm.so|libdl.so|libz.so|libstdc++.so|libc++_shared.so|libc++.so) continue ;;
+      # Android 平台
+      liblog.so|libandroid.so|libjnigraphics.so|libnativewindow.so|libsync.so) continue ;;
+      # 媒体 / 音频（本项目重点：libavcodec 走 MediaCodec 硬解）
+      libmediandk.so|libOpenSLES.so|libOpenMAXAL.so|libaaudio.so|libamidi.so|libcamera2ndk.so) continue ;;
+      # 图形
+      libEGL.so|libGLESv1_CM.so|libGLESv2.so|libGLESv3.so|libvulkan.so) continue ;;
+      # 其他 NDK 提供的系统组件
+      libbinder_ndk.so|libneuralnetworks.so) continue ;;
     esac
     [[ -n "${SEEN[$needed]:-}" ]] && continue
     candidate="$LIBDIR/$needed"
