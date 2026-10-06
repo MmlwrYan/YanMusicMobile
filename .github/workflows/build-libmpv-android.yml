@@ -111,7 +111,18 @@ jobs:
       #    runner 自带 SDK，但我们需要特定 NDK（buildscripts 期望 r28）
       #    与 API 35 build-tools。官方 download.sh 也会装，但显式控制
       #    版本更可靠；同时把 NDK 缓存起来。
+      #
+      # ⚠️ 必须先 setup-java(17)：ubuntu-22.04 runner 默认 JDK 是 **11**，
+      #    而 setup-android 带的 sdkmanager 要求 JDK 17+，
+      #    否则报 "This tool requires JDK 17 or later. Your version was
+      #    detected as 11.0.32.1." 并 exit 1（2026-10-06 首次 CI 实测）。
       # ────────────────────────────────────────────────────────────
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
       - name: Set up Android SDK / NDK
         uses: android-actions/setup-android@v3
         with:
@@ -311,6 +322,13 @@ jobs:
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: aarch64-linux-android
+
+      # ⚠️ 必须先 setup-java(17)：见 build-libmpv job 同名步骤的说明。
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: Setup Android SDK / NDK
         uses: android-actions/setup-android@v3
