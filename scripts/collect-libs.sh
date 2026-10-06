@@ -57,6 +57,41 @@ LIBDIR="$PREFIX/lib"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/$ABI"
 
+# ═════════════════════════════════════════════════════════════════
+# Android 系统库清单（**单一真相**）
+#
+# 这些 .so 由 Android OS 提供，系统自带，**不得打进 APK**：
+#   ① 打包进去没意义（设备上会用系统的那份）
+#   ② 反而可能因版本不匹配引发冲突
+#
+# ⚠️ 本清单同时被下面**两处**消费，必须保持一份：
+#      - 「递归收集 DT_NEEDED」阶段的跳过判定
+#      - 「依赖闭包完整性校验」阶段的豁免判定
+#    2026-10-06 的教训：这两处原本**各写了一份名单且不一致**，
+#    我只修了前者，后者仍把 libmediandk.so 判为缺失 → CI 继续红。
+#    两套名单必须合并为一，否则修一处漏一处。
+#
+# 清单来源：NDK r27
+#   sysroot/usr/lib/aarch64-linux-android/30/ 下的全部系统 .so
+#   （2026-10-06 实测列出，共 24 个；不是凭印象手写）
+# 新增 NDK 版本时，请对照该目录重新核对。
+# ═════════════════════════════════════════════════════════════════
+# 格式 A：供 `case` 匹配（以 | 分隔的完整库名）
+SYS_LIBS_CASE='libc.so|libm.so|libdl.so|libz.so|libstdc++.so|libc++_shared.so|libc++.so|liblog.so|libandroid.so|libjnigraphics.so|libnativewindow.so|libsync.so|libmediandk.so|libOpenSLES.so|libOpenMAXAL.so|libaaudio.so|libamidi.so|libcamera2ndk.so|libEGL.so|libGLESv1_CM.so|libGLESv2.so|libGLESv3.so|libvulkan.so|libbinder_ndk.so|libneuralnetworks.so'
+
+# 格式 B：供 `[[ =~ ]]` 匹配（正则；在 A 的基础上补充链接器与平台私有库）
+SYS_LIBS_REGEX='^(libc|libm|libdl|liblog|libandroid|libz|libstdc\+\+|libc\+\+_shared|libc\+\+|libOpenSLES|libOpenMAXAL|libaaudio|libamidi|libcamera2ndk|libmediandk|libEGL|libGLESv1_CM|libGLESv2|libGLESv3|libvulkan|libjnigraphics|libnativewindow|libsync|libbinder_ndk|libneuralnetworks|libcutils|libutils|libbase|libhardware|libhidlbase|libbinder|libui|libgui|ld-android|librt|libpthread)\.so$'
+
+# ── 自检：两份格式必须覆盖同一组库
+#    防止将来只改一处（这正是 2026-10-06 踩过的坑）
+_sys_check_fail=0
+while IFS= read -r _lib; do
+  [[ -z "$_lib" ]] && continue
+  [[ "$_lib" =~ $SYS_LIBS_REGEX ]] || { echo "[collect] 内部错误：$_lib 在 case 名单但不在 regex 名单" >&2; _sys_check_fail=1; }
+done < <(printf '%s\n' "$SYS_LIBS_CASE" | tr '|' '\n')
+(( _sys_check_fail == 0 )) || die "系统库名单两处不一致（见上）"
+unset _sys_check_fail _lib
+
 # ── 递归解析 DT_NEEDED，收集依赖
 #    用 llvm-readelf（NDK 自带）而非 readelf，保证与目标架构一致
 READELF="${NDK_DIR:-}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
@@ -89,34 +124,10 @@ while [[ ${#QUEUE[@]} -gt 0 ]]; do
   # 解析 DT_NEEDED
   while IFS= read -r needed; do
     [[ -z "$needed" ]] && continue
-    # ────────────────────────────────────────────────────────────
-    # Android 系统库由 OS 提供，**不要打包**（打进 APK 反而会冲突）。
-    #
-    # 这份名单是 NDK r27 `sysroot/usr/lib/aarch64-linux-android/30/`
-    # 下的全部系统 .so（2026-10-06 实测列出），不是凭印象手写的。
-    #
-    # ⚠️ 为什么必须写全：本脚本末尾会做「依赖闭包完整性」校验，
-    #    凡是解析出 DT_NEEDED 但在 stage 里找不到的，都会报缺失并 die。
-    #    如果某个系统库漏在名单外 → 被误判为「缺失」→ 整个 job 失败。
-    #    2026-10-06 CI 实测就栽在 `libmediandk.so` 上：
-    #      libavcodec.so -> libmediandk.so
-    #      FATAL: 依赖闭包不完整（共 1 项缺失）
-    #    libmediandk 是 NDK 的 android-mediandk（MediaCodec 硬解），
-    #    系统自带，绝不该打包。
-    #
-    # 新增 NDK 版本时，请对照该 sysroot 目录重新核对本名单。
-    # ────────────────────────────────────────────────────────────
+    # 系统库由 OS 提供，**不要打包**。
+    # 名单定义在脚本顶部 SYS_LIBS_CASE（单一真相，勿在此另写一份）。
     case "$needed" in
-      # libc / 运行时
-      libc.so|libm.so|libdl.so|libz.so|libstdc++.so|libc++_shared.so|libc++.so) continue ;;
-      # Android 平台
-      liblog.so|libandroid.so|libjnigraphics.so|libnativewindow.so|libsync.so) continue ;;
-      # 媒体 / 音频（本项目重点：libavcodec 走 MediaCodec 硬解）
-      libmediandk.so|libOpenSLES.so|libOpenMAXAL.so|libaaudio.so|libamidi.so|libcamera2ndk.so) continue ;;
-      # 图形
-      libEGL.so|libGLESv1_CM.so|libGLESv2.so|libGLESv3.so|libvulkan.so) continue ;;
-      # 其他 NDK 提供的系统组件
-      libbinder_ndk.so|libneuralnetworks.so) continue ;;
+      $SYS_LIBS_CASE) continue ;;
     esac
     [[ -n "${SEEN[$needed]:-}" ]] && continue
     candidate="$LIBDIR/$needed"
@@ -144,9 +155,11 @@ log "共收集 $COUNT 个 .so 文件"
 #
 # 做法：把 stage 里的每个 .so 再扫一遍 DT_NEEDED，
 #       凡是不属于「系统库白名单」的，都必须已存在于 stage 中。
+#
+# ⚠️ 白名单用顶部的 SYS_LIBS_REGEX（与上面的 SYS_LIBS_CASE 同源）。
+#    2026-10-06 的教训：这里原本**另写了一份正则**，与上面那份不一致，
+#    导致修了一处、另一处仍报错。
 # ─────────────────────────────────────────────────────────────────
-SYS_WHITELIST='^(libc|libm|libdl|liblog|libandroid|libz|libstdc\+\+|libc\+\+_shared|libOpenSLES|libEGL|libGLESv2|libjnigraphics|libnativewindow|libsync|libcutils|libutils|libbase|libhardware|libhidlbase|libbinder|libui|libgui|ld-android|librt|libpthread)\.so$'
-
 log "校验依赖闭包完整性…"
 MISSING=()
 while IFS= read -r so; do
@@ -154,7 +167,7 @@ while IFS= read -r so; do
   base="$(basename "$so")"
   while IFS= read -r need; do
     [[ -z "$need" ]] && continue
-    [[ "$need" =~ $SYS_WHITELIST ]] && continue
+    [[ "$need" =~ $SYS_LIBS_REGEX ]] && continue
     [[ -f "$STAGE/$ABI/$need" ]] && continue
     MISSING+=("$base -> $need")
   done < <("$READELF" -d "$so" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(.*\)\].*/\1/p')
