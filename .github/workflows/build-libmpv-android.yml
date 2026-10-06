@@ -95,13 +95,42 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential git wget curl unzip zip \
             pkg-config autoconf automake libtool \
-            python3 python3-pip \
-            ninja-build meson \
+            python3 python3-pip python3-venv \
+            ninja-build \
             nasm yasm \
             libssl-dev \
             ca-certificates
+
+          # ──────────────────────────────────────────────────────────
+          # ⚠️ 不要用 apt 的 meson：ubuntu-22.04 源里是 **0.61.2**（2022 年），
+          #    而 mpv-android buildscripts 当前要编的 fontconfig 要求
+          #    `meson >= 1.11.0`，会直接报：
+          #      meson.build:1:0: ERROR: Meson version is 0.61.2
+          #      but project requires >= 1.11.0
+          #    （2026-10-06 CI 实测）。
+          #
+          #    改用 pip 装新版 meson（官方 meson 也是这么分发的），
+          #    并用 pipx/venv 式隔离避免污染系统 python。
+          #    装完必须校验版本 —— 否则旧版可能仍在 PATH 前头。
+          # ──────────────────────────────────────────────────────────
+          python3 -m venv /opt/meson-venv
+          /opt/meson-venv/bin/pip install --upgrade pip
+          /opt/meson-venv/bin/pip install "meson>=1.11,<2"
+
+          echo "/opt/meson-venv/bin" >> "$GITHUB_PATH"
+          export PATH="/opt/meson-venv/bin:$PATH"
+
           echo "--- versions ---"
+          which meson
           meson --version
+          # 硬断言：版本必须 >= 1.11，否则后续 fontconfig 构建必挂
+          MESON_VER="$(meson --version)"
+          python3 -c "
+          import sys
+          v = tuple(int(x) for x in '$MESON_VER'.split('.')[:2])
+          assert v >= (1, 11), f'meson 版本过低：$MESON_VER（要求 >= 1.11）'
+          print('meson version OK:', '$MESON_VER')
+          "
           ninja --version
           python3 --version
           gcc --version | head -1
