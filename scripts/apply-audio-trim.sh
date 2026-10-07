@@ -173,6 +173,14 @@ if grep -qE '^[[:space:]]*(\.\./|\./)?configure' "$FFMPEG_SCRIPT"; then
   done < "$FFMPEG_SCRIPT"
   mv "$FFMPEG_NEW" "$FFMPEG_SCRIPT"
 
+  # ⚠️ 必须补回可执行位：上面用 `: > $NEW` + `mv` 改写，
+  #    新文件按 umask（通常 644）创建，mv 会把原文件的 755 覆盖掉。
+  #    buildscripts 是**直接执行** `../../scripts/ffmpeg.sh build`，
+  #    丢了 x 位就会 `Permission denied` → exit 126（2026-10-07 CI 实测栽在此）。
+  #    注意：这条在 Windows/MSYS 上测不出来（权限位不生效，mv 后照样"可执行"）。
+  chmod +x "$FFMPEG_SCRIPT"
+  [[ -x "$FFMPEG_SCRIPT" ]] || die "$FFMPEG_SCRIPT 不可执行 —— buildscripts 会以 Permission denied 失败"
+
   # ⚠️ 断言「数组定义真的被插进去了」——上面的 awk 写法曾在
   #    Windows 上静默不插入，光看退出码是绿的。
   if [[ $inserted_flags -eq 0 ]] || ! grep -q '^audio_trim_flags=(' "$FFMPEG_SCRIPT"; then
@@ -286,6 +294,9 @@ if [[ -f "$MPV_SCRIPT" ]]; then
       done
       # 在这一行**行尾**追加（保留原有内容与缩进）
       sed -i "${last_line}s#\$# ${MPV_MESON_TRIM[*]}#" "$MPV_SCRIPT"
+      # ⚠️ GNU sed -i 走的是「写临时文件再 rename」，同样可能丢掉可执行位
+      #    （buildscripts 直接执行 ../../scripts/mpv.sh）。显式补回。
+      chmod +x "$MPV_SCRIPT"
       log "  已在 meson 命令（第 ${meson_line}-${last_line} 行）行尾追加裁剪参数"
     fi
 
