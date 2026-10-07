@@ -73,8 +73,19 @@ jobs:
       #    `inputs.arch` 直接引用 —— 会得到空字符串，导致 buildall
       #    收到 `--arch ""` 而失败。
       ARCH: ${{ inputs.arch || 'arm64' }}
-      # audio_only 默认 true；显式传 false 才走完整构建
-      AUDIO_ONLY: ${{ (inputs.audio_only == false) && '0' || '1' }}
+      # audio_only 默认 true；仅 workflow_dispatch 显式传 false 才走完整构建。
+      #
+      # ⚠️ 必须一起判断 event_name：push / tag 触发时 `inputs` 上下文**整个为空**，
+      #    此时 `inputs.audio_only` 为 null。GitHub 表达式的宽松相等下
+      #    `null == false` 为 **true** —— 于是 (null == false) && '0' → '0'，
+      #    把「默认音频专用」翻成了「完整构建」，与本段注释声明的默认相反。
+      #    2026-10-06 CI 实证：push 触发时第 12 步「Apply audio-only trimming」
+      #    → skipped，MANIFEST 写 `模式：full（AUDIO_ONLY=0）`，未压缩 105MB。
+      #    加 event_name 判断后：
+      #      push / tag         → '1'（audio，符合本文件顶部「音频专用」定位）
+      #      dispatch + false   → '0'（full，仅手动显式要求时）
+      #      dispatch + true    → '1'（audio，默认值）
+      AUDIO_ONLY: ${{ (github.event_name == 'workflow_dispatch' && inputs.audio_only == false) && '0' || '1' }}
       MPV_VERSION_OVERRIDE: ${{ inputs.mpv_version || '' }}
       # buildscripts 期望的目录名（download.sh 会占用此路径）
       WORKDIR: ${{ github.workspace }}/android-build
