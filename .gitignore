@@ -24,3 +24,6 @@ gradle-app.setting
 
 # 搬迁备份目录（如启用「先平级、后归档」方案，归档进本库时须排除）
 _backup-android-*/
+
+# AI 助手的工程记忆（项目相关数据，非临时缓存；不入库）
+.workbuddy/
