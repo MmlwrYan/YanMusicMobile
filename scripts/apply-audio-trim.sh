@@ -78,37 +78,34 @@ cat > "$TRIM_FLAGS_FILE" <<'EOF'
 # ═══════════════════════════════════════════════════════════════
 # [audio-trim] 以下为 YanMusic 音频专用裁剪，由 apply-audio-trim.sh 注入
 # ═══════════════════════════════════════════════════════════════
+# ⚠️ 顺序不能改：ffmpeg configure 对冲突选项是「**后者覆盖前者**」，
+#    所以必须「先 --disable-<大类>，再按白名单 --enable-<组件>」。
+#    反过来写的话，白名单会被大类开关一起关掉（2026-10-07 修正）。
+#
+# ⚠️ `--disable-video-decoders` 已删除 —— ffmpeg 没有这个选项，
+#    传进去 configure 会因未知选项直接退出（2026-10-07 修正）。
+#    关闭视频解码靠 `--disable-decoders` + 音频白名单。
+#
+# ⚠️ 不再 `--disable-zlib` —— Matroska 的压缩头需要它，
+#    mka/mkv 是主力格式，禁掉会导致读不了。
 audio_trim_flags=(
-  # ── 保留：音频解码（含高解析与无损） ──
-  --enable-decoder=aac,aac_latm,mp3,flac,alac,ape,wavpack,tta,tak
-  --enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be,pcm_s24be,pcm_s32be
-  --enable-decoder=dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar
-  --enable-decoder=vorbis,opus,ac3,eac3,dca,truehd,mlp
-  --enable-decoder=alac,adpcm_ima_wav,adpcm_ms,wmav1,wmav2,wmalossless
-  # ── 保留：解复用器（含 CUE / 整轨格式） ──
-  --enable-demuxer=mov,matroska,flac,mp3,ogg,wav,aiff,ape,dsf,dff,tak,wv,tta,tta
-  --enable-demuxer=aac,ac3,eac3,dts,truehd,asf,cue,concat,image2
-  # ── 保留：解析器 ──
-  --enable-parser=aac,aac_latm,mpegaudio,flac,ape,dsd,vorbis,opus,dca,ac3
-  # ── 保留：协议（本地 + 流式） ──
-  --enable-protocol=file,http,https,tcp,tls,hls,data,cache,pipe,concat
-  # ── 保留：音频滤镜（EQ / IR 卷积 / 重采样） ──
-  --enable-filter=equalizer,superequalizer,aeval,afir,aiir,afftfilt
-  --enable-filter=aresample,aformat,anull,volume,alimiter,acompressor,agate
-  --enable-filter=atempo,asetrate,asetpts,atrim,concat,anullsink,abuffer
-  --enable-filter=channelmap,pan,join,asplit,amix,amerge,highpass,lowpass
-  --enable-filter=acrossfade,adelay,volume
-  # ── 保留：必要的基础设施 ──
-  --enable-swresample
-  --enable-avfilter
-  --enable-network
-  # ── 关闭：编码 / 封装（播放器不需要） ──
+  # ═══ 第一步：关掉组件大类 ═══
+  --disable-decoders
+  --disable-demuxers
+  --disable-parsers
+  --disable-protocols
+  --disable-filters
+  --disable-bsfs
+
+  # ═══ 第二步：关掉编码 / 封装 / 工具（播放器不需要）═══
   --disable-encoders
   --disable-muxers
   --disable-programs
   --disable-doc
-  # ── 关闭：视频栈 ──
-  --disable-video-decoders
+
+  # ═══ 第三步：关掉设备与硬件加速（Android 音频用不到）═══
+  --disable-devices
+  --disable-hwaccels
   --disable-vaapi
   --disable-vdpau
   --disable-cuda
@@ -117,25 +114,47 @@ audio_trim_flags=(
   --disable-dxva2
   --disable-videotoolbox
   --disable-mediacodec
-  # ── 关闭：设备 / 硬件 ──
-  --disable-devices
-  --disable-hwaccels
-  --disable-iconv
-  --disable-bzlib
-  --disable-zlib
-  --disable-lzo
-  --disable-lzma
+  --disable-libdav1d
+
+  # ═══ 第四步：关掉桌面平台与调试符号 ═══
   --disable-sdl2
   --disable-xlib
   --disable-libxcb
   --disable-debug
   --disable-symver
+
+  # ═══ 第五步：按白名单打开音频能力（必须在 disable 之后）═══
+  # ── 解码器（含高解析与无损）──
+  --enable-decoder=aac,aac_latm,mp3,flac,alac,ape,wavpack,tta,tak
+  --enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_s16be,pcm_s24be,pcm_s32be
+  --enable-decoder=dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar
+  --enable-decoder=vorbis,opus,ac3,eac3,dca,truehd,mlp
+  --enable-decoder=adpcm_ima_wav,adpcm_ms,wmav1,wmav2,wmalossless
+  # ── 解复用器（含 CUE / 整轨格式）──
+  --enable-demuxer=mov,matroska,flac,mp3,ogg,wav,aiff,ape,dsf,dff,tak,wv,tta
+  --enable-demuxer=aac,ac3,eac3,dts,truehd,asf,cue,concat
+  # ── 解析器 ──
+  --enable-parser=aac,aac_latm,mpegaudio,flac,ape,dsd,vorbis,opus,dca,ac3
+  # ── 协议（本地 + 流式）──
+  --enable-protocol=file,http,https,tcp,tls,hls,data,cache,pipe,concat
+  # ── 比特流滤镜（AAC over HLS 需要）──
+  --enable-bsf=aac_adtstoasc
+  # ── 音频滤镜（EQ / IR 卷积 / 重采样）──
+  --enable-filter=equalizer,superequalizer,aeval,afir,aiir
+  --enable-filter=aresample,aformat,anull,volume,alimiter,acompressor,agate
+  --enable-filter=atempo,asetrate,asetpts,atrim,abuffer,abuffersink,anullsink
+  --enable-filter=channelmap,pan,join,asplit,amix,amerge,highpass,lowpass
+  --enable-filter=acrossfade,adelay
+  # ── 基础设施 ──
+  --enable-swresample
+  --enable-avfilter
+  --enable-network
 )
 audio_trim_flags_joined="${audio_trim_flags[*]}"
 EOF
 
 # 在 `./configure` 或其等价调用前插入我们的数组，并把数组拼进调用
-if grep -qE '^[[:space:]]*(\./)?configure' "$FFMPEG_SCRIPT"; then
+if grep -qE '^[[:space:]]*(\.\./|\./)?configure' "$FFMPEG_SCRIPT"; then
   # ── 插入 flags 定义 ──
   # ⚠️ 不要用 `awk -v flagsfile=... 'while ((getline l < flagsfile))'`：
   #    Windows/MSYS 下 mktemp 产生的是 `/tmp/xxx` 形式路径，
@@ -146,7 +165,7 @@ if grep -qE '^[[:space:]]*(\./)?configure' "$FFMPEG_SCRIPT"; then
   : > "$FFMPEG_NEW"
   inserted_flags=0
   while IFS= read -r line; do
-    if [[ $inserted_flags -eq 0 && "$line" =~ ^[[:space:]]*(\./)?configure ]]; then
+    if [[ $inserted_flags -eq 0 && "$line" =~ ^[[:space:]]*(\.\./|\./)?configure ]]; then
       cat "$TRIM_FLAGS_FILE" >> "$FFMPEG_NEW"
       inserted_flags=1
     fi
@@ -178,8 +197,12 @@ if grep -qE '^[[:space:]]*(\./)?configure' "$FFMPEG_SCRIPT"; then
   #          --prefix=...
   #    若模式写成 `[^\\]*`（要求 configure 后到行尾无反斜杠），
   #    多行续行写法会完全匹配不上 → 注入静默失败。
-  if ! grep -qE '^[[:space:]]*(\./)?configure.*audio_trim_flags_joined' "$FFMPEG_SCRIPT"; then
-    sed -i -E 's#^([[:space:]]*(\./)?configure)(.*)$#\1 $audio_trim_flags_joined\3#' "$FFMPEG_SCRIPT"
+  if ! grep -qE '^[[:space:]]*(\.\./|\./)?configure.*audio_trim_flags_joined' "$FFMPEG_SCRIPT"; then
+    # ⚠️ 必须追加到**行尾**（`\1\3 $var`），不能插在 configure 与 `\3` 之间。
+    #    ffmpeg configure 是「后者覆盖前者」，若我们的 flags 在上游 args 之前，
+    #    上游的 `--enable-mediacodec` / `--enable-libdav1d` 会反过来盖掉裁剪。
+    #    （2026-10-07 本地实测发现并修正）
+    sed -i -E 's#^([[:space:]]*(\.\./|\./)?configure)(.*)$#\1\3 $audio_trim_flags_joined#' "$FFMPEG_SCRIPT"
   fi
 
   # ── 生效点断言 ──
@@ -187,7 +210,7 @@ if grep -qE '^[[:space:]]*(\./)?configure' "$FFMPEG_SCRIPT"; then
   # 那些字样就写在我们插入的数组定义里，即便 configure 从未引用它，
   # 断言照样是绿的（v1.3.3 曾栽在同类「标识符存在 ≠ 生效」的误判上）。
   # 真正决定生效的是：configure 行必须引用该变量。
-  if ! grep -qE '^[[:space:]]*(\./)?configure.*audio_trim_flags_joined' "$FFMPEG_SCRIPT"; then
+  if ! grep -qE '^[[:space:]]*(\.\./|\./)?configure.*audio_trim_flags_joined' "$FFMPEG_SCRIPT"; then
     die "ffmpeg configure 调用行未引用 \$audio_trim_flags_joined —— 裁剪参数不会生效"
   fi
   log "  ✓ 已注入 ffmpeg 音频白名单参数（数组定义 + configure 引用均已断言）"
@@ -319,7 +342,7 @@ check_present 'equalizer'    "$FFMPEG_SCRIPT" 'equalizer（10 段 EQ）'
 # ⚠️ 上面 6 条只证明「字样存在于文件」，不证明「参数真的传给了 configure」——
 #    字样就写在注入的数组定义里，注入失败时它们照样在。
 #    真正决定生效的是下面这条：configure 行必须引用那个变量。
-if ! grep -qE '^[[:space:]]*(\./)?configure.*audio_trim_flags_joined' "$FFMPEG_SCRIPT"; then
+if ! grep -qE '^[[:space:]]*(\.\./|\./)?configure.*audio_trim_flags_joined' "$FFMPEG_SCRIPT"; then
   die "ffmpeg configure 行未引用 \$audio_trim_flags_joined —— 音频白名单参数不会被应用"
 fi
 log "  ✓ configure 行确实引用了 audio_trim_flags_joined（生效点已确认）"
