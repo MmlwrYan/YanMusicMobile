@@ -94,9 +94,9 @@ for d in "$JNILIBS_DIR" "$PREBUILT_DIR"; do
 done
 if [[ "$MPV_FOUND" == "0" ]]; then
   warn "未找到 libmpv.so —— App 会装上但 **播放功能不可用**（V2 会失败）。"
-  warn "这是预期状态（libmpv 需 CI 构建）。若要完整体验："
-  warn "  1) 触发 CI：gh workflow run build-libmpv-android.yml"
-  warn "  2) 下载 artifact 解包到 <repo>/prebuilt/arm64-v8a/"
+  warn "这是预期状态（libmpv 体积大，不入库）。若要完整体验："
+  warn "  1) 下载 Release 附件：yanmusicmobile-libmpv-v0.0.1-alpha-arm64-v8a.tar.gz"
+  warn "  2) 解包到 $PREBUILT_DIR/"
   warn "  3) 重跑本脚本"
 fi
 if [[ -f "$BUILD_JNI_DIR/libyan_engine_jni.so" ]]; then
@@ -104,14 +104,14 @@ if [[ -f "$BUILD_JNI_DIR/libyan_engine_jni.so" ]]; then
 else
   die "缺少 libyan_engine_jni.so —— 请先跑：
        source scripts/env-android.sh
-       cd android && cargo build -p yan-engine-jni --target aarch64-linux-android --release"
+       cargo build -p yan-engine-jni --target aarch64-linux-android --release"
 fi
 
 # ── ③ 打包 ──
 if [[ "$DO_BUILD" == "1" ]]; then
   log "③ 重新打包 debug APK"
   ( cd "$ANDROID_DIR" && ./gradlew :app:assembleDebug --console=plain -q ) \
-    || die "assembleDebug 失败。单独跑看日志：cd android && ./gradlew :app:assembleDebug"
+    || die "assembleDebug 失败。单独跑看日志：cd \"$REPO_ROOT\" && ./gradlew :app:assembleDebug"
   ok "打包完成"
 fi
 

@@ -89,6 +89,14 @@ jobs:
       MPV_VERSION_OVERRIDE: ${{ inputs.mpv_version || '' }}
       # buildscripts 期望的目录名（download.sh 会占用此路径）
       WORKDIR: ${{ github.workspace }}/android-build
+      # 本 job 显式安装的 NDK 版本。
+      #
+      # ⚠️ 注意：这个 NDK **不用于构建 libmpv** —— mpv-android buildscripts 会
+      #    按自己的 depinfo.sh（`v_ndk=r30`）另行下载解压到
+      #    `$WORKDIR/mpv-android/buildscripts/sdk/android-ndk-r30`。
+      #    此处的 r28 只用于给本 workflow 的辅助工具（clang 校验）用。
+      #    libc++ 的补齐必须取**构建用的那个 NDK**，见 Collect 步骤。
+      NDK_VERSION: '28.0.13004108'
 
     steps:
       - name: Checkout
@@ -166,7 +174,7 @@ jobs:
       - name: Set up Android SDK / NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0 ndk;28.0.13004108'
+          packages: 'platforms;android-35 build-tools;35.0.0 ndk;${{ env.NDK_VERSION }}'
       
       - name: Verify NDK
         run: |
@@ -184,12 +192,19 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK"
           ls "$SDK/ndk/"
-          NDK_DIR="$(ls -d "$SDK"/ndk/* | head -1)"
+          # ⚠️ 必须**按版本**取，不能 `ls -d "$SDK"/ndk/* | head -1`：
+          #    ubuntu runner 预装了 27.3.13750724，字典序排在 28.0.13004108 之前，
+          #    `head -1` 会静默选中**错误的 NDK**（2026-10-07 CI 日志实证：
+          #    NDK_DIR: /usr/local/lib/android/sdk/ndk/27.3.13750724）。
+          #    该变量用于给 collect-libs / verify-libs 提供 readelf，
+          #    版本不对会读到与构建工具链不一致的解析结果。
+          NDK_DIR="$SDK/ndk/$NDK_VERSION"
           if [ -z "$NDK_DIR" ] || [ ! -d "$NDK_DIR" ]; then
-            echo "::error::NDK 未安装"
+            echo "::error::NDK $NDK_VERSION 未安装于 $NDK_DIR"
             exit 1
           fi
           echo "NDK_DIR=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK_DIR=$NDK_DIR"
           "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version | head -2
 
       # ────────────────────────────────────────────────────────────
@@ -295,7 +310,52 @@ jobs:
       # ────────────────────────────────────────────────────────────
       - name: Collect native libraries
         run: |
+          # ──────────────────────────────────────────────────────────
+          # ★ 让 collect-libs.sh 用「构建 libmpv 的那个 NDK」补 libc++_shared.so
+          #
+          # buildscripts 自行下载并使用的 NDK 由 depinfo.sh 的 `v_ndk` 决定
+          # （当前 = r30），解压到 buildscripts/sdk/android-ndk-<v_ndk>。
+          # 它与本 workflow 用 setup-android 装的 NDK（r28）**不是同一个**。
+          # 取错版本会缺符号（如 std::__ndk1::__from_chars_floating_point）
+          # → 真机 `cannot locate symbol`（2026-10-07 真机实测）。
+          # ──────────────────────────────────────────────────────────
+          DEPINFO="$WORKDIR/mpv-android/buildscripts/include/depinfo.sh"
+          V_NDK="$(sed -n 's/^[[:space:]]*v_ndk=\(.*\)$/\1/p' "$DEPINFO" | head -1 | tr -d ' \t\r"')"
+          echo "buildscripts v_ndk = '$V_NDK'"
+          MPV_NDK="$WORKDIR/mpv-android/buildscripts/sdk/android-ndk-$V_NDK"
+          if [ -d "$MPV_NDK" ]; then
+            # 同一 step 内后续命令看不到 $GITHUB_ENV 的新值 → 必须同时 export
+            echo "MPV_NDK_DIR=$MPV_NDK" >> "$GITHUB_ENV"
+            export MPV_NDK_DIR="$MPV_NDK"
+            echo "MPV_NDK_DIR=$MPV_NDK"
+            ls "$MPV_NDK" | head -5
+          else
+            echo "::warning::未找到 $MPV_NDK —— 交给脚本按 depinfo.sh 自行解析"
+          fi
           bash "$GITHUB_WORKSPACE/scripts/collect-libs.sh"
+
+      # ────────────────────────────────────────────────────────────
+      # 8b. ★ 符号守卫的「鉴别力自检」（变异测试）
+      #
+      # 项目纪律：守卫只看到绿不等于有效，必须验证它**坏输入时会红**。
+      # 这里把 stage 里的 libc++_shared.so 换成同名系统库副本（libc.so），
+      # 断言：原始 stage 绿、变异 stage 红，且红的原因正确。
+      #
+      # 为什么必须做：v0.0.1-alpha 的那次事故正是「CI 全绿但真机加载失败」——
+      # 一条恒绿的守卫比没有守卫更危险（它把错误结论固化下来）。
+      # 这一步把它变成 CI 里的硬失败，且**不依赖真机、不依赖 D 盘**。
+      # ────────────────────────────────────────────────────────────
+      - name: Self-test the symbol-closure guard (mutation test)
+        run: |
+          MPV_NDK="${MPV_NDK_DIR:-}"
+          if [ -z "$MPV_NDK" ]; then
+            V_NDK="$(sed -n 's/^[[:space:]]*v_ndk=\(.*\)$/\1/p' \
+              "$WORKDIR/mpv-android/buildscripts/include/depinfo.sh" | head -1 | tr -d ' \t\r"')"
+            MPV_NDK="$WORKDIR/mpv-android/buildscripts/sdk/android-ndk-$V_NDK"
+          fi
+          [ -d "$MPV_NDK" ] || { echo "::error::找不到构建用的 NDK：$MPV_NDK"; exit 1; }
+          bash "$GITHUB_WORKSPACE/scripts/selftest-symbol-guard.sh" \
+            "$STAGE_DIR" "$MPV_NDK" "$STAGE_TRIPLE"
 
       # ────────────────────────────────────────────────────────────
       # 9. 体积与架构验证（防止产出错误架构或意外膨胀）

@@ -27,3 +27,6 @@ _backup-android-*/
 
 # AI 助手的工程记忆（项目相关数据，非临时缓存；不入库）
 .workbuddy/
+
+# 本地过程文档（与 YanMusic 主仓同约定：dev-notes 不入库）
+dev-notes/
