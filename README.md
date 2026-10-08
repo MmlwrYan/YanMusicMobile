@@ -125,7 +125,17 @@ YanMusicMobile/
 
 ### 前置
 
-- **NDK r27+**（`build-rust-bridge` 用 `27.1.12297006`；`build-libmpv` 用 `28.0.13004108`）
+- **NDK** —— 三处用途版本各不相同，别混：
+
+  | 用途 | 版本 | 由谁指定 |
+  |---|---|---|
+  | `build-libmpv` 交叉编译 libmpv | `28.0.13004108` | workflow `env` |
+  | `build-rust-bridge` 链接 JNI 桥 | `27.1.12297006` | workflow `env` |
+  | **APK 打包时剥符号** | `27.1.12297006` | `app/build.gradle.kts` 的 `ndkVersion` |
+
+  > ⚠️ 本模块**不编译任何 C/C++**，但**仍然必须装 NDK** ——
+  > AGP 的 `:app:stripDebugDebugSymbols` 要用 NDK 里的 `llvm-strip`
+  > 给 `jniLibs` 里的 `.so` 剥符号。漏装会在该任务处失败。
 - **Rust** + `aarch64-linux-android` target
 - **Android SDK**（`platforms;android-35`、`build-tools;35.0.0`）
 - **JDK 17+**
