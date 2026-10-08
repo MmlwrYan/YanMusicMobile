@@ -14,11 +14,15 @@ import androidx.compose.ui.unit.dp
  * 但**不引入 `material3-window-size-class` 依赖** ——
  * 该库在我们离线构建环境里没有缓存，而需求只需一个宽度判断。
  *
- * | 档位 | 典型设备 | 导航形态 | 内容列数 |
+ * | 档位 | 典型设备 | 导航形态 | 典型内容列数 |
  * |---|---|---|---|
  * | [Compact] | 手机竖屏 | 底部导航栏 | 1–2 |
  * | [Medium] | 手机横屏 / 小折叠展开 / 小平板 | 侧边导航轨（仅图标） | 2–3 |
  * | [Expanded] | 平板 / 桌面模式 | 侧边导航轨（图标+文字） | 3–5 |
+ *
+ * ⚠️ 末列是**观察值，不是硬边界** —— 真实列数由各页 `GridCells.Adaptive(minSize)`
+ * 按可用宽度自行算出（歌单网格 148dp、榜单网格 190dp）。
+ * 本类**不参与**列数计算，只决定导航形态与内容限宽。
  */
 enum class WindowClass { Compact, Medium, Expanded }
 

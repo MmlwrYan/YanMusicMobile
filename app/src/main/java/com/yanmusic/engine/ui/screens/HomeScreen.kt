@@ -248,7 +248,7 @@ private fun BannerRow(
     }
 }
 
-/** 快捷入口：最近播放 / 我的收藏 / 本地音乐。 */
+/** 快捷入口：最近播放 / 我的收藏 / 导入音乐。（首页与音乐库页共用） */
 @Composable
 fun QuickEntryRow(
     recentCount: Int,
