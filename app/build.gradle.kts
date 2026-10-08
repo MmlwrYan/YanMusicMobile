@@ -3,7 +3,8 @@
 // ⚠️ 关键点：
 //  1. jniLibs 指向 Rust 产物 + libmpv 产物所在目录
 //  2. 只保留 arm64-v8a（Demo 阶段减半构建时间；产品期再加）
-//  3. 不用 NDK 编译 C++（我们的 native 来自 Rust 与 CI 产出的 .so）
+//  3. **不用 NDK 编译任何 C/C++** —— native 全部来自 Rust 与 CI 产出的 .so。
+//     但**仍然必须装 NDK**：见下方 `ndkVersion` 的说明。
 
 plugins {
     id("com.android.application")
@@ -14,6 +15,17 @@ plugins {
 android {
     namespace = "com.yanmusic.engine.demo"
     compileSdk = 35
+
+    // ⚠️ 这里**不是**多余的：虽然本模块不编译任何 C/C++，但 AGP 的
+    //    `:app:stripDebugDebugSymbols` 任务要用 NDK 里的 `llvm-strip`
+    //    给 jniLibs 里的 .so 剥符号 —— 没装 NDK 该任务会失败。
+    //
+    //  ✦ 显式钉死版本，而不是让 AGP 用它自己的默认值：
+    //    在此之前 ndkVersion 未声明 → AGP 用「AGP 内置默认版本」，
+    //    而 CI 装的是 27.1.12297006（与 build-rust-bridge 一致）——
+    //    **两者是否同一个版本，日志里查不到**，属于「复现性黑洞」。
+    //    显式声明后，本地与 CI 才真正用同一个 NDK。
+    ndkVersion = "27.1.12297006"
 
     defaultConfig {
         applicationId = "com.yanmusic.engine.demo"
