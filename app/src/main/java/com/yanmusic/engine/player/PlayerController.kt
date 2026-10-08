@@ -331,9 +331,14 @@ class PlayerController(
         if (dur > 0L) durationMs = dur
         val declared = current?.durationMs ?: 0L
         if (durationMs <= 0L && declared > 0L) durationMs = declared
-        val paused = MpvEngine.isPaused()
-        isPaused = paused
-        isPlaying = !paused && !MpvEngine.isIdle()
+
+        // ⚠️ 这里**刻意不读 `MpvEngine.isIdle()`**。
+        //    「是否正在播放」只由 mpv 的 `pause` 属性决定 —— 它是可靠且语义明确的；
+        //    而 idle 标志是 Rust 侧自己维护的，未经真机验证。若它不准，
+        //    播放按钮会每 250ms 被刷成「已暂停」，观感上直接是坏的。
+        //    播放结束由 PLAYBACK_END 事件驱动（见 onTrackEnded），不依赖这里。
+        isPaused = MpvEngine.isPaused()
+        isPlaying = !isPaused
     }
 
     fun consumeMessage() {

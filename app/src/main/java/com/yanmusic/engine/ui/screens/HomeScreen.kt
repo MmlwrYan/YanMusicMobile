@@ -265,7 +265,9 @@ fun QuickEntryRow(
     ) {
         QuickEntry("最近播放", recentCount, Icons.Rounded.History, onOpenRecent, Modifier.weight(1f))
         QuickEntry("我的收藏", favoriteCount, Icons.Rounded.Favorite, onOpenFavorites, Modifier.weight(1f))
-        QuickEntry("本地音乐", localCount, Icons.Rounded.LibraryMusic, onOpenLocal, Modifier.weight(1f))
+        // 标签用「导入音乐」而不是「本地音乐」—— 它点击后打开的是系统文件选择器，
+        // 写「本地音乐」会让人以为进入某个页面（本页本身就是本地音乐的所在）。
+        QuickEntry("导入音乐", localCount, Icons.Rounded.LibraryMusic, onOpenLocal, Modifier.weight(1f))
     }
 }
 
