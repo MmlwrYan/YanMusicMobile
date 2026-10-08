@@ -72,6 +72,7 @@ fun HomeScreen(
     onOpenBanner: (Banner) -> Unit,
     onPlaySong: (Song, List<Song>?) -> Unit,
     onSeeAllRecommended: () -> Unit,
+    onOpenSearch: () -> Unit,
 ) {
     val palette = YanTheme.palette
 
@@ -87,7 +88,7 @@ fun HomeScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item(span = { GridItemSpan(maxLineSpan) }) {
-            HomeGreeting()
+            HomeGreeting(onOpenSearch = onOpenSearch)
         }
 
         item(span = { GridItemSpan(maxLineSpan) }) {
@@ -139,7 +140,7 @@ fun HomeScreen(
 }
 
 @Composable
-private fun HomeGreeting() {
+private fun HomeGreeting(onOpenSearch: () -> Unit) {
     val palette = YanTheme.palette
     Column(modifier = Modifier.padding(top = 8.dp)) {
         Text(
@@ -149,12 +150,14 @@ private fun HomeGreeting() {
             fontWeight = FontWeight.Bold,
         )
         Spacer(Modifier.height(10.dp))
-        // 搜索入口（首版无搜索后端，点击给提示）
+        // 搜索入口：进搜索页（搜设备上已有的歌曲）。
+        // ⚠️ 这根条子**必须可点** —— 曾经漏了 clickable，是个「看着能搜、点了没反应」的死元素。
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(999.dp))
                 .background(palette.card)
+                .clickable(onClick = onOpenSearch)
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),

@@ -58,6 +58,7 @@ import com.yanmusic.engine.ui.screens.PlayerScreen
 import com.yanmusic.engine.ui.screens.PlaylistDetailScreen
 import com.yanmusic.engine.ui.screens.ProfileScreen
 import com.yanmusic.engine.ui.screens.RecentScreen
+import com.yanmusic.engine.ui.screens.SearchScreen
 import com.yanmusic.engine.ui.screens.SettingsScreen
 import com.yanmusic.engine.ui.theme.YanMusicTheme
 import com.yanmusic.engine.ui.theme.YanSpace
@@ -79,6 +80,7 @@ enum class RootTab(val label: String, val icon: ImageVector) {
 sealed interface Screen {
     data class Tab(val tab: RootTab) : Screen
     data object Player : Screen
+    data object Search : Screen
     data class PlaylistDetail(val playlistId: String, val title: String, val songs: List<Song>) : Screen
     data class RankDetail(val boardId: String, val title: String, val songs: List<Song>) : Screen
     data object Favorites : Screen
@@ -270,6 +272,7 @@ private fun ScreenContent(
                 onSeeAllRecommended = {
                     onOpen(Screen.PlaylistDetail("recommend", "每日推荐", repository.recommendedSongs))
                 },
+                onOpenSearch = { onOpen(Screen.Search) },
             )
 
             RootTab.Discover -> DiscoverScreen(
@@ -349,6 +352,13 @@ private fun ScreenContent(
         )
 
         Screen.Diagnostics -> DiagnosticsScreen(player = player, onBack = onBack)
+
+        Screen.Search -> SearchScreen(
+            repository = repository,
+            player = player,
+            onBack = onBack,
+            onPlaySong = onPlaySong,
+        )
     }
 }
 
