@@ -43,7 +43,7 @@ ok()  { printf '\033[1;32m[selftest]\033[0m %s\n' "$*"; }
 [[ -f "$GUARD" ]] || die "找不到守卫脚本：$GUARD"
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" 2>/dev/null || true' EXIT       # 清理失败不得影响退出码
 
 # ── 找一个系统库 stub 作为「李鬼」素材：优先 libc.so（且必须真有导出符号）
 STUB=""
