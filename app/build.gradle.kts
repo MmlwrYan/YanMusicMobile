@@ -69,6 +69,8 @@ android {
 
     buildFeatures {
         compose = true
+        // AGP 8 起 BuildConfig 默认不生成；「我的」页要显示版本号，故显式打开
+        buildConfig = true
     }
 
     packaging {

@@ -580,20 +580,22 @@ jobs:
   # ════════════════════════════════════════════════════════════════
   # job 3/3：build-apk —— 打包 Debug APK
   #
-  # 依赖 build-rust-bridge：APK 需要打包 libyan_engine_jni.so。
-  # 这一步把「能装起来」的链路固化进 CI：
-  #   下载 Rust 桥产物 → 放进 jniLibs → gradlew assembleDebug → 上传 APK
+  # 依赖 build-libmpv + build-rust-bridge：APK 需要两边的 .so。
+  # 这一步把「装完就能播」的链路固化进 CI：
+  #   下载 libmpv 产物 + Rust 桥产物 → 一起放进 jniLibs
+  #   → gradlew assembleDebug → 校验 APK 内含全部 native 库 → 上传 APK
   #
-  # ⚠️ 本 job 只打 Rust 桥的 .so，**不含 libmpv.so 及其依赖** ——
-  #    那些由 build-libmpv 产出，体积大且需单独分发。
-  #    因此该 APK 单独安装会在 System.loadLibrary("mpv") 处失败，
-  #    必须配合 build-libmpv 的 tar 使用（见 Release 说明 / README）。
+  # ⚠️ 2026-10-08 起本 job **同时打包 libmpv 及其全部依赖**（含 libc++_shared.so）。
+  #    此前只打 Rust 桥，导致产出的 APK 单独安装会在
+  #    System.loadLibrary("mpv") 处抛 UnsatisfiedLinkError，
+  #    必须另外下 libmpv 的 tar 才能跑 —— 那不是「能用的产品」。
+  #    现在 APK 自包含，Release 的 APK 可直接安装运行。
   # ════════════════════════════════════════════════════════════════
   build-apk:
     name: Build Debug APK (arm64)
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-    needs: build-rust-bridge
+    needs: [build-libmpv, build-rust-bridge]
 
     env:
       ABI: arm64-v8a
@@ -617,29 +619,38 @@ jobs:
         with:
           packages: 'platforms;android-35 build-tools;35.0.0 ndk;27.1.12297006'
 
-      - name: Download Rust bridge artifact
+      - name: Download native artifacts (libmpv + Rust bridge)
         uses: actions/download-artifact@v4
         with:
-          name: yan-engine-jni-android-${{ env.ABI }}
-          path: /tmp/rust-bridge
+          pattern: '*'
+          path: /tmp/native
 
-      - name: Unpack Rust .so into jniLibs
+      - name: Unpack all .so into jniLibs
         run: |
           set -euo pipefail
-          # artifact 是 tar.gz，包内结构为 <abi>/libyan_engine_jni.so
-          mkdir -p /tmp/rust-bridge-extract
-          tar -xzf /tmp/rust-bridge/libyan_engine_jni-android-$ABI.tar.gz \
-            -C /tmp/rust-bridge-extract
-          echo "=== 解包内容 ==="
-          find /tmp/rust-bridge-extract -type f -name '*.so' -exec ls -la {} \;
-
           DEST="app/src/main/jniLibs/$ABI"
           mkdir -p "$DEST"
+
+          echo "=== 下载到的 artifact ==="
+          find /tmp/native -maxdepth 2 -type f | sort
+
+          # libmpv 产物：包内结构 <abi>/*.so（9 个，含 libc++_shared.so）
+          tar -xzf /tmp/native/libmpv-*/libmpv-*.tar.gz -C "$DEST" --strip-components=1
+
+          # Rust 桥产物：包内结构 <abi>/libyan_engine_jni.so
+          mkdir -p /tmp/rust-bridge-extract
+          tar -xzf /tmp/native/yan-engine-jni-*/*.tar.gz -C /tmp/rust-bridge-extract
           cp /tmp/rust-bridge-extract/$ABI/*.so "$DEST/"
+
           echo "=== jniLibs/$ABI ==="
           ls -la "$DEST"
-          [ -f "$DEST/libyan_engine_jni.so" ] \
-            || { echo "::error::libyan_engine_jni.so 未就位：$DEST"; exit 1; }
+
+          # fail-closed：缺任何一个都不许继续
+          for f in libmpv.so libyan_engine_jni.so libc++_shared.so \
+                   libavcodec.so libavformat.so libavutil.so libswresample.so; do
+            [ -f "$DEST/$f" ] || { echo "::error::缺少 $f（$DEST）"; exit 1; }
+          done
+          echo "✓ 全部 native 库已就位（含 libmpv 与 libc++_shared.so）"
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -657,7 +668,7 @@ jobs:
       - name: Assemble Debug APK
         run: ./gradlew :app:assembleDebug --console=plain --stacktrace
 
-      - name: Verify APK contains the JNI library
+      - name: Verify APK contains all native libraries
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
@@ -665,48 +676,62 @@ jobs:
           echo "=== APK 信息 ==="
           ls -la "$APK"
           sha256sum "$APK"
-          echo "=== 确认 libyan_engine_jni.so 已打进 APK ==="
+          echo "=== APK 内 native 库 ==="
           unzip -l "$APK" | grep -E 'lib/.*\.so' || true
-          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libyan_engine_jni.so' \
-            || { echo "::error::APK 内缺少 lib/arm64-v8a/libyan_engine_jni.so"; exit 1; }
-          echo "✓ APK 内含 libyan_engine_jni.so"
+
+          # fail-closed：逐个点名。任何一个缺失都说明 APK 装上去跑不起来。
+          for f in libmpv.so libyan_engine_jni.so libc++_shared.so \
+                   libavcodec.so libavformat.so libavutil.so libswresample.so; do
+            unzip -l "$APK" | grep -q "lib/$ABI/$f" \
+              || { echo "::error::APK 内缺少 lib/$ABI/$f"; exit 1; }
+          done
+          echo "✓ APK 自包含：libmpv + 依赖 + libc++_shared.so + Rust 桥齐全"
+
+          echo "=== 内置试听曲 ==="
+          unzip -l "$APK" | grep -q 'assets/demo/yanmusic-hires-demo.wav' \
+            || { echo "::error::APK 内缺少内置试听曲 assets/demo/yanmusic-hires-demo.wav"; exit 1; }
+          echo "✓ 内置试听曲已打包"
 
       - name: Stage APK with README
         run: |
           set -euo pipefail
           mkdir -p out/apk
           cp app/build/outputs/apk/debug/app-debug.apk out/apk/
-          # 附一份说明，避免下载者误以为单独装就能跑
           cat > out/apk/README.txt << 'TXT'
-          YanMusicMobile v0.0.1-alpha —— 最小技术 Demo
+          YanMusicMobile —— 首版 UI（debug 构建）
           ============================================
 
           【这是什么】
-          一个最小技术 Demo，用于验证 Rust → JNI → libmpv → APK 这条链路。
-          不承诺功能完整、不承诺可日常使用、未做 GUI 冒烟。
+          移动端第一个带完整界面的版本：首页 / 发现 / 音乐库 / 我的
+          + 全屏播放器 + 迷你播放条，适配手机、折叠屏与平板。
+          播放内核是自建的 libmpv（音频专用裁剪）+ Rust JNI 桥。
 
-          【重要：本 APK 单独安装跑不起来】
-          本 APK 只包含 Rust JNI 桥（libyan_engine_jni.so），
-          不包含 libmpv.so 及其依赖（libavcodec / libavformat / libavutil /
-          libswresample / libass ...）。
+          【安装】
+          adb install -r app-debug.apk
+          或直接把 APK 传到手机点击安装（需允许「安装未知来源应用」）。
 
-          单独安装会在 System.loadLibrary("mpv") 处抛
-          UnsatisfiedLinkError。
+          本 APK 是**自包含**的：libmpv.so 及其全部依赖
+          （libavcodec / libavformat / libavutil / libswresample /
+           libswscale / libavfilter / libavdevice / libc++_shared.so）
+          都已打进 lib/arm64-v8a/，装完即可运行，无需额外推库。
 
-          【怎么才能跑起来】
-          需要把 libmpv 的 tar 解包到 app/src/main/jniLibs/arm64-v8a/，
-          重新打包，或用 scripts/install-and-run.sh 走真机流程。
-          详见仓库 README 第五节「真机运行」。
+          仅支持 arm64-v8a（64 位 ARM）。
+
+          【装完能做什么】
+          - 打开即有一个内置试听曲（24bit / 96kHz / 8 秒），点一下就会出声；
+          - 「音乐库 → 导入」可选择本机音频（flac / wav / mp3 / m4a …）；
+          - 播放时「我的 → 设置 → 引擎诊断」能看到实时音频参数
+            （采样率 / 声道 / 编码），用于确认 96kHz 文件未被重采样成 48kHz。
 
           【本版验证了什么】
-          - Rust → JNI 桥可编译、符号表对齐（20 个 JNI 符号）
-          - libmpv 交叉编译流水线在云 CI 跑通（arm64-v8a）
+          - 全部 Kotlin/Compose 代码编译通过，单元测试 14 项全绿
+          - APK 自包含性由 CI 逐库点名校验（fail-closed）
+          - libmpv 交叉编译 + 符号级依赖闭包守卫（含变异测试）
           - 16KB page size 对齐（Android 15+ / Google Play 2025-11 强制）
-          - APK 构建 + 单元测试在云 CI 跑通
 
           【未验证】
-          - 应用在真机上能否启动 / 播放 / 出声
-          - GUI 冒烟
+          - 真机 GUI 冒烟（本轮无法操作手机，界面未经截图核对）
+          - 各厂商 ROM 上的实际音量/后台行为
           TXT
           echo "=== stage 内容 ==="
           ls -la out/apk/

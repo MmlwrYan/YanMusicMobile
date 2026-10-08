@@ -2,213 +2,160 @@ package com.yanmusic.engine.demo
 
 import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
+import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import com.yanmusic.engine.AudioParams
-import com.yanmusic.engine.MpvEngine
-import com.yanmusic.engine.MpvEventCallback
-import com.yanmusic.engine.MpvEventType
+import androidx.compose.ui.unit.dp
+import com.yanmusic.engine.data.MusicRepository
+import com.yanmusic.engine.data.Song
+import com.yanmusic.engine.data.SongSource
+import com.yanmusic.engine.player.LocalAudioResolver
+import com.yanmusic.engine.player.PlayerController
+import com.yanmusic.engine.ui.AppRoot
+import kotlinx.coroutines.launch
 
 /**
- * 最小技术验证 Demo。
+ * 应用宿主。
  *
- * ## 验证链路（对应路线图的 V1–V8）
+ * 职责仅四件：
+ * 1. 组装依赖（仓库 / URI 解析器 / 播放控制器）；
+ * 2. 注册系统文件选择器（SAF），把选中的音频导入仓库；
+ * 3. 承载 [AppRoot] 与全局 Snackbar；
+ * 4. 生命周期收尾（销毁引擎）。
  *
- * V1 `.so` 存在且架构正确  → 由 CI 的 verify-libs.sh 保证
- * V2 `System.loadLibrary` 不抛异常 → [MpvEngine.loadNativeLibraries]
- * V3 `mpv_create` 成功     → [MpvEngine.probeLibmpvApiVersion]
- * V4 `mpv_initialize` 成功 → [MpvEngine.create]
- * V5 加载本地 FLAC         → 选文件后 [MpvEngine.load]
- * V6 **采样率 == 96000**   → 面板上的「高解析验证」区
- * V7 `time-pos` 持续推进   → 进度条
- * V8 logcat 无解码错误     → 事件日志区
+ * **界面全部在 `ui/` 包下** —— 本类不再包含任何布局代码，
+ * 与首版之前的「Demo 把 UI 写在 Activity 里」相比，
+ * 这样切换主题 / 复用页面都不需要碰 Activity。
  */
 class MainActivity : ComponentActivity() {
 
-    /** 引擎事件在 Rust 线程到达 → 统一切到主线程再更新 UI。 */
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private lateinit var repository: MusicRepository
+    private lateinit var resolver: LocalAudioResolver
+    private lateinit var player: PlayerController
 
-    /** 引擎事件日志（保留最近 N 条）。 */
-    private val eventLog = mutableStateListOf<String>()
+    /** setContent 里注入的导入处理器（SAF 回调晚于 onCreate，故用可空持有）。 */
+    private var importHandler: ((List<Uri>) -> Unit)? = null
 
-    /** 高解析验证结果。 */
-    private var audioParams by mutableStateOf<AudioParams?>(null)
-
-    /** 引擎探针结果（V3）。 */
-    private var probeResult by mutableStateOf<String>("尚未探测")
-
-    /**
-     * 初始化状态。
-     *
-     * ⚠️ 必须显式标注 `mutableStateOf<InitState>(...)` ——
-     *    若写成 `mutableStateOf(InitState.NotStarted)`，Kotlin 会把泛型
-     *    推断成 `InitState.NotStarted`（这个 data object 的具体类型），
-     *    后续 `initState = InitState.Ready` 就会报类型不匹配。
-     */
-    private var initState: InitState by mutableStateOf<InitState>(InitState.NotStarted)
-
-    /** 事件回调 —— ⚠️ 在 Rust 事件线程被调用。 */
-    private val callback = object : MpvEventCallback {
-        override fun onEvent(type: Int, argF64: Double, argI64: Long, text: String?) {
-            // 只在本线程做 O(1) 的投递，重活交给主线程
-            mainHandler.post {
-                val name = when (type) {
-                    MpvEventType.TIME_UPDATE -> "TIME_UPDATE"
-                    MpvEventType.DURATION_CHANGE -> "DURATION_CHANGE"
-                    MpvEventType.STATE_CHANGE -> "STATE_CHANGE"
-                    MpvEventType.PLAYBACK_END -> "PLAYBACK_END"
-                    MpvEventType.FILE_LOADED -> "FILE_LOADED"
-                    MpvEventType.IDLE -> "IDLE"
-                    MpvEventType.ERROR -> "ERROR"
-                    MpvEventType.LOG_MESSAGE -> "LOG"
-                    else -> "UNKNOWN($type)"
-                }
-                val line = buildString {
-                    append(name)
-                    if (argF64 != 0.0) append(" f=$argF64")
-                    if (argI64 != 0L) append(" i=$argI64")
-                    if (!text.isNullOrEmpty()) append(" 「$text」")
-                }
-                eventLog.add(line)
-                if (eventLog.size > 60) eventLog.removeAt(0)
-
-                // 文件加载完成 → 立即读取音频参数（V6 验证）
-                if (type == MpvEventType.FILE_LOADED) {
-                    // 稍等一拍，等 mpv 把 audio-params 填好
-                    mainHandler.postDelayed({ refreshAudioParams() }, 400)
-                }
-            }
-        }
-    }
-
-    /** SAF 选文件。 */
+    /** 多选音频文件。 */
     private val pickAudio = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            eventLog.add("选择了文件：$uri")
-            // Demo：直接用 content:// URI。libmpv 需要 fd 路径，
-            // 但 mpv 的 Android 构建通常支持 content:// 或需转 /proc/self/fd。
-            // 这里先传原始 URI，若失败会在事件里看到 error。
-            val ok = MpvEngine.load(uri.toString())
-            eventLog.add(if (ok) "load 命令已受理" else "load 失败：${MpvEngine.lastError}")
-        }
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) importHandler?.invoke(uris)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        repository = MusicRepository()
+        resolver = LocalAudioResolver(this)
+        player = PlayerController(repository, resolver)
+
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(color = Color(0xFF0F0F14), modifier = Modifier.fillMaxSize()) {
-                    DemoScreen(
-                        initState = initState,
-                        probeResult = probeResult,
-                        eventLog = eventLog,
-                        audioParams = audioParams,
-                        onLoadLibs = { doLoadLibraries() },
-                        onInit = { doInitEngine() },
-                        onPickFile = { pickAudio.launch(arrayOf("audio/*")) },
-                        onPlayPause = {
-                            MpvEngine.togglePause()
-                            eventLog.add("togglePause → paused=${MpvEngine.isPaused()}")
-                        },
-                        onStop = {
-                            MpvEngine.stop()
-                            audioParams = null
-                        },
-                        onProbeOnly = { doProbeOnly() },
-                    )
+            var darkTheme by rememberSaveable { mutableStateOf(true) }
+            val snackbarHostState = remember { SnackbarHostState() }
+            val scope = rememberCoroutineScope()
+
+            val showMessage: (String) -> Unit = { msg ->
+                scope.launch {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    snackbarHostState.showSnackbar(msg)
                 }
             }
-        }
 
-        // 启动时自动跑一次「加载库 + 探测」，让 Demo 一打开就有结果
-        doLoadLibraries()
+            // 播放层产生的一次性提示（选到示例条目、解码失败等）
+            LaunchedEffect(player.message) {
+                val msg = player.message
+                if (msg != null) {
+                    showMessage(msg)
+                    player.consumeMessage()
+                }
+            }
+
+            importHandler = { uris -> importAudio(uris, showMessage) }
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                AppRoot(
+                    repository = repository,
+                    player = player,
+                    darkTheme = darkTheme,
+                    onToggleTheme = { darkTheme = !darkTheme },
+                    onImportFiles = { pickAudio.launch(arrayOf("audio/*")) },
+                    onShowMessage = showMessage,
+                )
+                SnackbarHost(
+                    hostState = snackbarHostState,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 104.dp, start = 12.dp, end = 12.dp),
+                )
+            }
+        }
     }
 
     override fun onDestroy() {
-        MpvEngine.destroy()
+        player.release()
         super.onDestroy()
     }
 
-    // ── 步骤动作 ──
-
-    private fun doLoadLibraries() {
-        val err = MpvEngine.loadNativeLibraries()
-        initState = if (err == null) {
-            InitState.LibsLoaded
-        } else {
-            InitState.Failed(err)
+    /** 把 SAF 选中的 URI 登记进仓库。 */
+    private fun importAudio(uris: List<Uri>, showMessage: (String) -> Unit) {
+        var added = 0
+        uris.forEach { uri ->
+            val display = queryDisplayName(uri) ?: uri.lastPathSegment ?: "未知文件"
+            val ext = display.substringAfterLast('.', "").uppercase()
+            val song = Song(
+                id = uri.toString(),
+                title = display.substringBeforeLast('.'),
+                artist = "本地文件",
+                album = if (ext.isNotEmpty()) ext else "音频",
+                source = SongSource.LocalUri(uri.toString()),
+            )
+            val before = repository.localSongs.size
+            repository.addLocalSong(song)
+            if (repository.localSongs.size > before) added++
+            persistPermission(uri)
         }
-        eventLog.add(
-            if (err == null) "✓ V2 原生库加载成功" else "✗ V2 原生库加载失败：$err"
+        showMessage(
+            if (added > 0) "已导入 $added 首，可在「音乐库 · 本地音乐」里播放"
+            else "这些文件已经在音乐库里了"
         )
     }
 
-    private fun doProbeOnly() {
-        // V3：不初始化引擎，只 dlopen 读版本
-        val api = MpvEngine.probeLibmpvApiVersion()
-        probeResult = if (api == null) {
-            "✗ libmpv 加载失败（.so 缺失或依赖不全）"
-        } else {
-            // mpv API 版本编码：major<<16 | minor
-            val major = (api shr 16) and 0xFFFF
-            val minor = api and 0xFFFF
-            "✓ libmpv API $major.$minor（原始值 $api）"
+    /** 读 SAF 的显示名（用于标题）。 */
+    private fun queryDisplayName(uri: Uri): String? = runCatching {
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && cursor.moveToFirst()) cursor.getString(idx) else null
         }
-        eventLog.add("V3 探测：$probeResult")
-    }
+    }.getOrNull()
 
-    private fun doInitEngine() {
-        // V4：创建并初始化引擎
-        val ok = MpvEngine.create(callback = callback, audioOutput = "aaudio")
-        initState = if (ok) {
-            InitState.Ready
-        } else {
-            InitState.Failed(MpvEngine.lastError ?: "未知错误")
-        }
-        eventLog.add(
-            if (ok) "✓ V4 引擎初始化成功（版本 ${MpvEngine.engineVersion()}）"
-            else "✗ V4 引擎初始化失败：${MpvEngine.lastError}"
-        )
-    }
-
-    private fun refreshAudioParams() {
-        val p = MpvEngine.getAudioParams()
-        audioParams = p
-        if (p != null) {
-            val verdict = when {
-                p.isHiRes -> "✓ V6 高解析达成（≥88.2kHz）"
-                else -> "⚠ V6 未达高解析（${p.samplerate} Hz）"
-            }
-            eventLog.add("$verdict：${p.samplerate}Hz / ${p.channels}ch / ${p.codec} / ${p.format}")
+    /**
+     * 申请持久化读权限。
+     *
+     * 不申请的话，进程重启后原 URI 会失效 —— 表现为「列表里还在，点了播不出」。
+     * 部分 Provider（如某些网盘）不支持持久化，失败可忽略。
+     */
+    private fun persistPermission(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
         }
     }
-}
-
-/** 初始化阶段状态。 */
-sealed interface InitState {
-    /** 尚未开始 */
-    data object NotStarted : InitState
-    /** 原生库已加载（V2 通过），引擎未创建 */
-    data object LibsLoaded : InitState
-    /** 引擎已就绪（V4 通过） */
-    data object Ready : InitState
-    /** 失败 */
-    data class Failed(val reason: String) : InitState
 }
